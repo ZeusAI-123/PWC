@@ -241,7 +241,7 @@ if st.session_state.get("selected_table"):
     # 6. GENAI DECISION
     # =========================
     if st.button("🤖 Ask Zeus"):
-        decision_raw = get_ingestion_decision(
+        decision_raw = get_ingestion_decision(openai_client,
                 db_schema,
                 file_schema,
                 st.session_state["selected_table"],
@@ -412,6 +412,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
