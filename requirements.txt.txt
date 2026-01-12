@@ -1,0 +1,4 @@
+pyodbc
+streamlit
+snowflake-connector-python
+pandas
