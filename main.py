@@ -17,11 +17,8 @@ st.session_state.setdefault("decision", None)
 st.session_state.setdefault("confirm", False)
 load_dotenv()
 
-# Validate API key exists
-# api_key = os.getenv("OPENAI_API_KEY")
+
 api_key = st.secrets["OPENAI_API_KEY"]
-# if not api_key:
-#     raise ValueError("OPENAI_API_KEY not found in environment variables!")
 
 openai_client = OpenAI(
     api_key=api_key,
@@ -415,6 +412,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
