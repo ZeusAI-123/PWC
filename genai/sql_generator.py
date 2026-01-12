@@ -127,10 +127,10 @@ JSON FORMAT:
 
 
 
-  response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
+  response = client.responses.create(
+    model="gpt-4o-mini",
+    input=prompt
+)
 
   return response.choices[0].message.content
+
