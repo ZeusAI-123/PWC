@@ -218,11 +218,11 @@ if st.session_state.get("selected_table"):
     # =========================
     # 5. SHOW SCHEMA DETAILS
     # =========================
-        st.subheader("📊 Schema Details")
+        st.subheader("📊 Data Catalog")
 
         if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
             # ✅ Only file schema
-            st.markdown("### 📁 Uploaded File Schema")
+            st.markdown("### 📁 Catalog from File")
             st.dataframe(file_schema)
             st.metric("File Column Count", len(file_schema))
 
@@ -231,12 +231,12 @@ if st.session_state.get("selected_table"):
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("### 🗄 Existing Table Schema")
+                st.markdown("### 🗄 Catalog from DB")
                 st.dataframe(db_schema)
                 st.metric("DB Column Count", len(db_schema))
 
             with col2:
-                st.markdown("### 📁 Uploaded File Schema")
+                st.markdown("### 📁 Catalog from File")
                 st.dataframe(file_schema)
                 st.metric("File Column Count", len(file_schema))
 
@@ -415,6 +415,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
