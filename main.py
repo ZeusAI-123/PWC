@@ -123,7 +123,7 @@ if st.button("Connect"):
 # 3. TABLE SELECTION
 # =========================
 if "tables" in st.session_state:
-    st.subheader("📋 Select Target Table")
+    st.subheader("📋 Select Table")
 
     tables_df = st.session_state["tables"]
 
@@ -135,7 +135,6 @@ if "tables" in st.session_state:
         st.session_state["tables"] = tables_df  # update session state
 
     selected_table = st.selectbox(
-        "Choose the table to ingest into",
         tables_df["full_name"]
     )
 
@@ -152,7 +151,7 @@ if "tables" in st.session_state:
 # =========================
 # 4. FILE UPLOAD
 # =========================
-st.subheader("📤 Upload Data File")
+st.subheader("📤 Upload File to ingest")
 
 uploaded_file = st.file_uploader(
     "Upload CSV or Excel",
@@ -189,24 +188,24 @@ if uploaded_file and "selected_table" in st.session_state:
     # =========================
     # 5. SHOW SCHEMA DETAILS
     # =========================
-    st.subheader("📊 Schema Comparison")
+    st.subheader("📊 Data Catalog")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("### 🗄 Existing Table Schema")
+        st.markdown("### 🗄 Catlog from DB")
         st.dataframe(db_schema)
         st.metric("DB Column Count", len(db_schema))
 
     with col2:
-        st.markdown("### 📁 Uploaded File Schema")
+        st.markdown("### 📁 Catlog from file")
         st.dataframe(file_schema)
         st.metric("File Column Count", len(file_schema))
 
     # =========================
     # 6. GENAI DECISION
     # =========================
-    if st.button("🤖 Ask GenAI"):
+    if st.button("🤖 Ask Zeus"):
         decision_raw = get_ingestion_decision(openai_client,
             db_schema,
             file_schema,
@@ -225,7 +224,7 @@ if "decision" in st.session_state:
     decision = st.session_state["decision"]
     target_table = st.session_state["selected_table"]
 
-    st.subheader("🔍 GenAI Suggested Actions")
+    # st.subheader("🔍 GenAI Suggested Actions")
 
     st.write("**Target Table:**", target_table)
     st.write("**Action:**", decision["action"])
@@ -248,7 +247,7 @@ if "decision" in st.session_state:
     # =========================
     # 9. EXECUTION (SAFE)
     # =========================
-    if st.button("🚀 Execute Ingestion", disabled=not confirm):
+    if st.button("🚀 Ingest", disabled=not confirm):
         try:
             conn = st.session_state["conn"]
             cursor = conn.cursor()
@@ -382,6 +381,7 @@ if "decision" in st.session_state:
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
