@@ -1,9 +1,15 @@
 from openai import OpenAI
 
-# client = OpenAI()
+api_key = st.secrets["OPENAI_API_KEY"]
+
+openai_client = OpenAI(
+    api_key=api_key,
+    timeout=30,
+    max_retries=3  
+)
 
 def get_ingestion_decision(
-    client,
+    openai_client,
     db_schema,
     file_schema,
     table_name,
@@ -127,11 +133,12 @@ JSON FORMAT:
 
 
 
-  response = client.responses.create(
+  response = openai_client.responses.create(
     model="gpt-4o-mini",
     input=prompt
 )
 
   return response.output_text
+
 
 
