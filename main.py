@@ -14,7 +14,8 @@ import json
 load_dotenv()
 
 # Validate API key exists
-api_key = os.getenv("OPENAI_API_KEY")
+# api_key = os.getenv("OPENAI_API_KEY")
+api_key = st.secrets["OPENAI_API_KEY"]
 if not api_key:
     raise ValueError("OPENAI_API_KEY not found in environment variables!")
 
@@ -381,5 +382,6 @@ if "decision" in st.session_state:
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
