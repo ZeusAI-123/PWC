@@ -23,8 +23,12 @@ def insert_data(conn, insert_sql, df_aligned, dialect):
         cursor.executemany(insert_sql, rows)
         conn.commit()
 
-    else:  # snowflake
+    try:
         cursor.executemany(insert_sql, rows)
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     cursor.close()
+
