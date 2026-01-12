@@ -18,13 +18,13 @@ st.session_state.setdefault("confirm", False)
 load_dotenv()
 
 
-api_key = st.secrets["OPENAI_API_KEY"]
+# api_key = st.secrets["OPENAI_API_KEY"]
 
-openai_client = OpenAI(
-    api_key=api_key,
-    timeout=30,
-    max_retries=3  
-)
+# openai_client = OpenAI(
+#     api_key=api_key,
+#     timeout=30,
+#     max_retries=3  
+# )
 
 st.set_page_config(
     page_title="ZeusAI SQL Ingestion",
@@ -241,7 +241,7 @@ if st.session_state.get("selected_table"):
     # 6. GENAI DECISION
     # =========================
     if st.button("🤖 Ask Zeus"):
-        decision_raw = get_ingestion_decision(openai_client,
+        decision_raw = get_ingestion_decision(
                 db_schema,
                 file_schema,
                 st.session_state["selected_table"],
@@ -412,6 +412,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
