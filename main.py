@@ -26,11 +26,11 @@ openai_client = OpenAI(
 )
 
 st.set_page_config(
-    page_title="GenAI SQL Ingestion POC",
+    page_title="ZeusAI SQL Ingestion POC",
     layout="wide"
 )
 
-st.title("🧠 GenAI-Driven DATA Ingestion")
+st.title("🧠 ZeusAI-Driven DATA Ingestion")
 
 def safe_json_loads(text):
     try:
@@ -382,6 +382,7 @@ if "decision" in st.session_state:
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
