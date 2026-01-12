@@ -135,7 +135,7 @@ if "tables" in st.session_state:
         st.session_state["tables"] = tables_df  # update session state
 
     selected_table = st.selectbox(
-        "Select Table"
+        "Select Table",
         tables_df["full_name"]
     )
 
@@ -382,6 +382,7 @@ if "decision" in st.session_state:
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
