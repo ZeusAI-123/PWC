@@ -30,7 +30,7 @@ openai_client = OpenAI(
 )
 
 st.set_page_config(
-    page_title="ZeusAI SQL Ingestion POC",
+    page_title="ZeusAI SQL Ingestion",
     layout="wide"
 )
 
@@ -415,6 +415,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
