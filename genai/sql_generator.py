@@ -1,4 +1,5 @@
 from openai import OpenAI
+import streamlit as st
 
 api_key = st.secrets["OPENAI_API_KEY"]
 
@@ -139,6 +140,7 @@ JSON FORMAT:
 )
 
   return response.output_text
+
 
 
 
