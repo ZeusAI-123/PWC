@@ -11,6 +11,10 @@ from spark.ingest import insert_data
 from openai import OpenAI
 import json
 # Load environment variables first
+st.session_state.setdefault("ingestion_mode", None)
+st.session_state.setdefault("selected_table", None)
+st.session_state.setdefault("decision", None)
+st.session_state.setdefault("confirm", False)
 load_dotenv()
 
 # Validate API key exists
@@ -120,26 +124,49 @@ if st.button("Connect"):
         st.error(f"❌ Connection failed: {e}")
         st.stop()
 # =========================
+# 3. INGESTION MODE
+# =========================
+if "conn" in st.session_state:
+    st.subheader("🧭 Ingestion Mode")
+
+    ingestion_mode = st.radio(
+        "Choose ingestion type",
+        ["Ingest into Existing Table", "Create New Table (GenAI)"],
+        index=None
+    )
+
+    st.session_state["ingestion_mode"] = ingestion_mode
+# =========================
 # 3. TABLE SELECTION
 # =========================
-if "tables" in st.session_state:
+if st.session_state["ingestion_mode"] and "tables" in st.session_state:
     # st.subheader("📋 Select Table")
 
     tables_df = st.session_state["tables"]
 
     # 🔒 Always ensure full_name exists
-    if "full_name" not in tables_df.columns:
-        tables_df["full_name"] = (
-            tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-        )
-        st.session_state["tables"] = tables_df  # update session state
+    # if "full_name" not in tables_df.columns:
+    #     tables_df["full_name"] = (
+    #         tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+    #     )
+    #     st.session_state["tables"] = tables_df  # update session state
 
-    selected_table = st.selectbox(
-        "Select Table",
-        tables_df["full_name"]
-    )
+    if st.session_state["ingestion_mode"] == "Ingest into Existing Table":
+        selected_table = st.selectbox(
+            "Choose existing table",
+            tables_df["full_name"]
+        )
+    else:
+        selected_table = st.text_input(
+            "Enter new table name",
+            placeholder="schema.new_table"
+        )
+        if not selected_table:
+            st.info("ℹ️ Enter a table name to continue")
+            st.stop()
 
     st.session_state["selected_table"] = selected_table
+
     dialect = st.session_state["db_dialect"]
 
     if dialect == "sqlserver":
@@ -152,56 +179,66 @@ if "tables" in st.session_state:
 # =========================
 # 4. FILE UPLOAD
 # =========================
-st.subheader("📤 Upload File to ingest")
-
-uploaded_file = st.file_uploader(
-    "Upload CSV or Excel",
-    type=["csv", "xlsx"]
-)
-
-if uploaded_file and "selected_table" in st.session_state:
-    # Force ALL data to string (VARCHAR rule)
-    if uploaded_file.name.endswith(".csv"):
-        df_file = pd.read_csv(uploaded_file, dtype=str)
-    else:
-        df_file = pd.read_excel(uploaded_file, dtype=str)
-
-    df_file = df_file.astype(str)
-
-    file_schema = pd.DataFrame({
-        "COLUMN_NAME": df_file.columns,
-        "DATA_TYPE": ["varchar"] * len(df_file.columns)
-    })
-
-    conn = st.session_state["conn"]
-
-    db_schema = get_table_schema(
-        conn,
-        schema_name,
-        table_name,
-        st.session_state["db_dialect"]
+if st.session_state.get("selected_table"):
+    st.subheader("📤 Upload File to ingest")
+    
+    uploaded_file = st.file_uploader(
+        "Upload CSV or Excel",
+        type=["csv", "xlsx"]
     )
-
-
-    # Force DB schema dtype to varchar (POC rule)
-    db_schema["DATA_TYPE"] = "varchar"
-
+    
+    if uploaded_file and st.session_state.get("selected_table"):
+        # Force ALL data to string (VARCHAR rule)
+        if uploaded_file.name.endswith(".csv"):
+            df_file = pd.read_csv(uploaded_file, dtype=str)
+        else:
+            df_file = pd.read_excel(uploaded_file, dtype=str)
+    
+        df_file = df_file.astype(str)
+    
+        file_schema = pd.DataFrame({
+            "COLUMN_NAME": df_file.columns,
+            "DATA_TYPE": ["varchar"] * len(df_file.columns)
+        })
+    
+        conn = st.session_state["conn"]
+    
+        # 🔥 KEY LOGIC
+        if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
+            db_schema = pd.DataFrame(columns=["COLUMN_NAME", "DATA_TYPE"])
+        else:
+            db_schema = get_table_schema(
+                conn,
+                schema_name,
+                table_name,
+                dialect
+            )
+            db_schema["DATA_TYPE"] = "varchar"
+    
     # =========================
     # 5. SHOW SCHEMA DETAILS
     # =========================
-    st.subheader("📊 Data Catalog")
+        st.subheader("📊 Schema Details")
 
-    col1, col2 = st.columns(2)
+        if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
+            # ✅ Only file schema
+            st.markdown("### 📁 Uploaded File Schema")
+            st.dataframe(file_schema)
+            st.metric("File Column Count", len(file_schema))
 
-    with col1:
-        st.markdown("### 🗄 Catlog from DB")
-        st.dataframe(db_schema)
-        st.metric("DB Column Count", len(db_schema))
+        else:
+            # ✅ Comparison mode
+            col1, col2 = st.columns(2)
 
-    with col2:
-        st.markdown("### 📁 Catlog from file")
-        st.dataframe(file_schema)
-        st.metric("File Column Count", len(file_schema))
+            with col1:
+                st.markdown("### 🗄 Existing Table Schema")
+                st.dataframe(db_schema)
+                st.metric("DB Column Count", len(db_schema))
+
+            with col2:
+                st.markdown("### 📁 Uploaded File Schema")
+                st.dataframe(file_schema)
+                st.metric("File Column Count", len(file_schema))
 
     # =========================
     # 6. GENAI DECISION
@@ -221,7 +258,8 @@ if uploaded_file and "selected_table" in st.session_state:
 # =========================
 # 7. SHOW GENAI SQL (PREVIEW)
 # =========================
-if "decision" in st.session_state:
+
+if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
     decision = st.session_state["decision"]
     target_table = st.session_state["selected_table"]
 
@@ -229,6 +267,11 @@ if "decision" in st.session_state:
 
     st.write("**Target Table:**", target_table)
     st.write("**Action:**", decision["action"])
+
+    if decision.get("create_sql"):
+        st.markdown("### 🆕 CREATE TABLE")
+        for sql in decision["create_sql"]:
+            st.code(sql, language="sql")
 
     if decision["alter_sql"]:
         st.markdown("### 🛠 ALTER TABLE SQL")
@@ -241,14 +284,20 @@ if "decision" in st.session_state:
     # =========================
     # 8. USER CONFIRMATION
     # =========================
-    confirm = st.checkbox(
-        "I confirm the above SQL should be executed ONLY on the selected table"
+if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
+
+    st.session_state["confirm"] = st.checkbox(
+        "I confirm the above SQL should be executed ONLY on the selected table",
+        value=st.session_state["confirm"]
     )
 
-    # =========================
-    # 9. EXECUTION (SAFE)
-    # =========================
-    if st.button("🚀 Ingest", disabled=not confirm):
+    if st.button(
+        "🚀 Execute",
+        disabled=not st.session_state["confirm"]
+    ):
+        # run_ingestion()
+        decision = st.session_state["decision"]
+        target_table = st.session_state["selected_table"]
         try:
             conn = st.session_state["conn"]
             cursor = conn.cursor()
@@ -256,7 +305,15 @@ if "decision" in st.session_state:
             # ---------------------------
             # 1. Execute ALTER safely
             # ---------------------------
-            for sql in decision["alter_sql"]:
+            # CREATE TABLE
+            if decision["action"] == "CREATE_AND_INSERT":
+                for sql in decision["create_sql"]:
+                    if target_table.lower() not in sql.lower():
+                        st.error("❌ Unsafe CREATE detected")
+                        st.stop()
+                    cursor.execute(sql)
+                    
+            for sql in decision.get("alter_sql", []):
                 if target_table not in sql:
                     st.error("❌ Unsafe ALTER detected. Execution blocked.")
                     st.stop()
@@ -271,10 +328,9 @@ if "decision" in st.session_state:
             cols_part = insert_sql.split("(")[1].split(")")[0]
             raw_columns = [c.strip() for c in cols_part.split(",")]
 
-            if dialect == "sqlserver":
-                insert_columns = [c.strip("[]") for c in raw_columns]
-            else:  # snowflake
-                insert_columns = [c.strip('"') for c in raw_columns]
+            insert_columns = [
+            c.strip("[]\"").upper() for c in raw_columns
+        ]
 
             # ---------------------------
             # 3. Normalize column names (CRITICAL)
@@ -282,49 +338,25 @@ if "decision" in st.session_state:
             df = st.session_state["df_file"]
 
             df.columns = [c.strip().upper() for c in df.columns]
-            insert_columns = [c.strip().upper() for c in insert_columns]
+            # insert_columns = [c.strip().upper() for c in insert_columns]
 
             # ---------------------------
             # 4. STRICT alignment (NO reindex)
             # ---------------------------
-            try:
-                df_aligned = df[insert_columns]
-            except KeyError as e:
-                st.error(f"❌ Column alignment failed: {e}")
-                st.stop()
+            df_aligned = df[insert_columns]
 
-            # ---------------------------
-            # 5. Fix placeholder mismatch
-            # ---------------------------
             placeholder = "?" if dialect == "sqlserver" else "%s"
-
             if insert_sql.count(placeholder) != len(insert_columns):
-                # Use fully qualified table for Snowflake
-                target = target_table if dialect == "sqlserver" else \
-                    '"GENAI_INGESTION_DB"."PUBLIC"."ZFBL5N_MAIN"'
-
                 insert_sql = rebuild_insert_sql(
-                    target,
-                    insert_columns,
-                    dialect
+                    target_table, insert_columns, dialect
                 )
-                st.warning("⚠️ INSERT SQL rebuilt for correctness.")
 
-            # ---------------------------
-            # 6. FINAL INSERT
-            # ---------------------------
-            insert_data(
-                conn,
-                insert_sql,
-                df_aligned,
-                dialect
-            )
+            insert_data(conn, insert_sql, df_aligned, dialect)
 
-            st.success(f"✅ Inserted {len(df_aligned)} rows successfully")
+            st.success(f"✅ {len(df_aligned)} rows ingested successfully")
 
         except Exception as e:
             st.error(f"❌ Execution failed: {e}")
-
 
 
 # st.set_page_config(page_title="GenAI Ingestion POC", layout="wide")
@@ -382,6 +414,7 @@ if "decision" in st.session_state:
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
