@@ -316,9 +316,10 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
     # =========================
 if "impacted_views" in st.session_state:
     st.subheader("🔎 Downstream Impact Analysis")
-    st.write("Impacted views columns:", df.columns.tolist())
+    
 
     df = st.session_state["impacted_views"]
+    st.write("Impacted views columns:", df.columns.tolist())
 
     if df.empty:
         st.success("✅ No downstream views will be impacted.")
@@ -513,6 +514,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
