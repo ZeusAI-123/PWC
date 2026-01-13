@@ -109,7 +109,7 @@ db_type = st.radio(
 if db_type == "SQL Server":
     st.subheader("🔌 SQL Server Connection")
 
-    col1, col2 = st.columns([1, 2])
+    col1, col2 = st.columns(2)
 
     with col1:
         server = st.text_input("Server")
@@ -129,7 +129,7 @@ if db_type == "SQL Server":
 if db_type == "Snowflake":
     st.subheader("❄️ Snowflake Connection")
 
-    col1, col2 = st.columns([1, 2])
+    col1, col2 = st.columns(2)
 
     with col1:
         account = st.text_input(
@@ -559,6 +559,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
