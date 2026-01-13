@@ -9,6 +9,7 @@ from genai.sql_generator import get_ingestion_decision
 from spark.schema_compare import get_file_schema
 from spark.ingest import insert_data
 from openai import OpenAI
+import re
 import json
 # Load environment variables first
 st.session_state.setdefault("ingestion_mode", None)
@@ -316,7 +317,12 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
                     st.error("❌ Empty CREATE TABLE SQL generated")
                     st.stop()
             
-                create_sql = create_sql.strip().rstrip(";")
+                create_sql = re.sub(
+                    r"\bRETURNS\s+VARCHAR\b",
+                    "",
+                    create_sql,
+                    flags=re.IGNORECASE
+                ).strip().rstrip(";")
             
                 # Safety check
                 if not create_sql.lower().startswith("create table"):
@@ -431,6 +437,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
