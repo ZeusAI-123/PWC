@@ -85,33 +85,30 @@ JSON FORMAT:
 
   return response.output_text
 
-def classify_view_risk_llm(openai_client, views_df, table_name):
-    views_payload = views_df.to_dict(orient="records")
+def classify_impacted_views_llm(openai_client, views_df, base_table):
+    payload = views_df.to_dict(orient="records")
 
     prompt = f"""
 You are a senior data engineer performing downstream impact analysis.
 
-Target base table:
-{table_name}
+Base table:
+{base_table}
 
-For EACH view below, analyze ONLY the SQL provided.
+Classify EACH view using ONLY these rules:
 
-Classify risk using these EXACT rules:
+1. If "SELECT * FROM {base_table}" → HIGH, precedence 1
+2. If FULL JOIN or FULL OUTER JOIN → HIGH, precedence 2
+3. If INNER JOIN → MODERATE_HIGH, precedence 3
+4. If LEFT JOIN → LOW, precedence 4
+5. If RIGHT JOIN → LOW, precedence 5
 
-1. If "SELECT * FROM {table_name}" is used → HIGH (precedence 1)
-2. If FULL JOIN or FULL OUTER JOIN is used → HIGH (precedence 2)
-3. If INNER JOIN is used → MODERATE_HIGH (precedence 3)
-4. If LEFT JOIN is used → LOW (precedence 4)
-5. If RIGHT JOIN is used → LOW (precedence 5)
+Precedence resolution:
+- 1 → Definitely HIGH risk
+- 2 or 3 → Moderately HIGH risk
+- 4 or 5 → NOT an issue
 
-Final precedence:
-- Rule 1 → HIGH
-- Rule 2 or 3 → MODERATE_HIGH
-- Rule 4 or 5 → LOW
+Return ONLY valid JSON in this format:
 
-Return ONLY valid JSON.
-
-JSON format:
 [
   {{
     "view_name": "",
@@ -122,7 +119,7 @@ JSON format:
 ]
 
 Views:
-{views_payload}
+{payload}
 """
 
     response = openai_client.responses.create(
