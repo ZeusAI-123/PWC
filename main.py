@@ -96,7 +96,7 @@ def build_risk_df(impacted_views_df, llm_result_json):
         how="left"
     )
 
-    final_df = final_df.sort_values("precedence")
+    # final_df = final_df.sort_values("precedence")
 
     return final_df
 
@@ -378,7 +378,6 @@ if "impacted_views" in st.session_state:
         # 3️⃣ Merge + enforce precedence ordering
         final_df = (
             df.merge(risk_df, on="view_name", how="left")
-              .sort_values("precedence")
         )
 
         st.dataframe(final_df)
@@ -542,6 +541,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
