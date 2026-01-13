@@ -7,6 +7,7 @@ import os
 from spark.schema_compare import get_tables, get_table_schema
 from genai.sql_generator import get_ingestion_decision
 from spark.schema_compare import get_file_schema
+from spark.lineage import get_impacted_views_snowflake
 from spark.ingest import insert_data
 from openai import OpenAI
 import re
@@ -238,6 +239,22 @@ if st.session_state.get("selected_table"):
                 st.dataframe(file_schema)
                 st.metric("File Column Count", len(file_schema))
 
+
+        if (
+            db_type == "Snowflake"
+            and st.session_state["ingestion_mode"] == "Ingest into Existing Table"
+            and st.session_state.get("selected_table")
+        ):
+            impacted_views = get_impacted_views_snowflake(
+                conn=st.session_state["conn"],
+                database=database,
+                schema="PUBLIC",
+                table=table_name
+            )
+        
+            st.session_state["impacted_views"] = impacted_views
+
+
     # =========================
     # 6. GENAI DECISION
     # =========================
@@ -283,6 +300,23 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
     # =========================
     # 8. USER CONFIRMATION
     # =========================
+if "impacted_views" in st.session_state:
+    st.subheader("🔎 Downstream Impact Analysis")
+
+    df = st.session_state["impacted_views"]
+
+    if df.empty:
+        st.success("✅ No downstream views will be impacted.")
+    else:
+        st.warning(
+            f"⚠️ {len(df)} downstream object(s) will be affected by this ingestion"
+        )
+        st.dataframe(df)
+
+        st.caption(
+            "Any INSERT into this table will immediately reflect in the above views."
+        )
+
 if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 
     st.session_state["confirm"] = st.checkbox(
@@ -437,6 +471,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
