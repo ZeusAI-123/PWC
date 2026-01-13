@@ -317,8 +317,13 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 if "impacted_views" in st.session_state:
     st.subheader("🔎 Downstream Impact Analysis")
     
-
     df = st.session_state["impacted_views"]
+
+    # 🔥 FIX: normalize column names
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+    st.session_state["impacted_views"] = df
+
     st.write("Impacted views columns:", df.columns.tolist())
 
     if df.empty:
@@ -328,7 +333,7 @@ if "impacted_views" in st.session_state:
             f"⚠️ {len(df)} downstream object(s) will be affected by this ingestion"
         )
 
-        # 1️⃣ Fetch view SQL
+        # 1️⃣ Fetch view SQL (NOW THIS WORKS)
         view_defs = get_view_definitions(
             conn=st.session_state["conn"],
             database=database,
@@ -514,6 +519,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
