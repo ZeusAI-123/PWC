@@ -7,7 +7,7 @@ import os
 from spark.schema_compare import get_tables, get_table_schema
 from genai.sql_generator import get_ingestion_decision, classify_view_risk_llm
 from spark.schema_compare import get_file_schema
-from spark.lineage import get_impacted_views_snowflake
+from spark.lineage import get_impacted_views_snowflake, get_view_definitions
 from spark.ingest import insert_data
 from openai import OpenAI
 import re
@@ -60,6 +60,20 @@ def rebuild_insert_sql(table_name, columns, dialect):
         placeholders = ", ".join(["%s"] * len(columns))
 
     return f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
+
+def build_risk_df(impacted_views_df, llm_result_json):
+    risk_df = pd.DataFrame(llm_result_json)
+
+    final_df = impacted_views_df.merge(
+        risk_df,
+        on="view_name",
+        how="left"
+    )
+
+    final_df = final_df.sort_values("precedence")
+
+    return final_df
+
 
 db_type = st.radio(
     "Select Database Type",
@@ -311,11 +325,38 @@ if "impacted_views" in st.session_state:
         st.warning(
             f"⚠️ {len(df)} downstream object(s) will be affected by this ingestion"
         )
-        st.dataframe(df)
+
+        # 1️⃣ Fetch view SQL
+        view_defs = get_view_definitions(
+            conn=st.session_state["conn"],
+            database=database,
+            schema="PUBLIC",
+            view_names=df["view_name"].tolist()
+        )
+
+        # 2️⃣ Send to LLM
+        llm_raw = classify_impacted_views_llm(
+            openai_client=openai_client,
+            views_df=view_defs,
+            base_table=table_name
+        )
+
+        llm_result = safe_json_loads(llm_raw)
+        risk_df = pd.DataFrame(llm_result)
+
+        # 3️⃣ Merge + enforce precedence ordering
+        final_df = (
+            df.merge(risk_df, on="view_name", how="left")
+              .sort_values("precedence")
+        )
+
+        st.dataframe(final_df)
 
         st.caption(
-            "Any INSERT into this table will immediately reflect in the above views."
+            "Risk is classified based on join type and SELECT usage. "
+            "Precedence determines severity."
         )
+
 
 if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 
@@ -471,6 +512,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
