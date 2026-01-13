@@ -35,18 +35,44 @@ st.set_page_config(
 
 st.title("🧠 ZeusAI-Driven DATA Ingestion")
 
-def safe_json_loads(text):
+def safe_json_loads(text: str):
+    """
+    Safely extract and parse the FIRST valid JSON object or array
+    from an LLM response.
+    """
+
+    if not text:
+        raise ValueError("❌ Empty LLM response")
+
+    # Remove markdown fences if present
+    text = text.replace("```json", "").replace("```", "").strip()
+
+    # Try direct parse first
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Attempt to extract JSON from text
-        start = text.find("{")
-        end = text.rfind("}") + 1
+        pass
 
-        if start != -1 and end != -1:
-            return json.loads(text[start:end])
+    # Regex: extract JSON array OR object
+    json_pattern = re.compile(
+        r"(\[\s*{.*?}\s*\]|\{\s*.*?\s*\})",
+        re.DOTALL
+    )
 
-        raise ValueError("❌ GenAI did not return valid JSON")
+    matches = json_pattern.findall(text)
+
+    if not matches:
+        raise ValueError("❌ No valid JSON found in LLM output")
+
+    # Try parsing matches one by one
+    for candidate in matches:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError("❌ Found JSON-like text but failed to parse it")
+
     
 # def escape_sqlserver_columns(cols):
 #     return [f"[{c}]" for c in cols]
@@ -519,6 +545,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
