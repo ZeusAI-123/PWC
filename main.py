@@ -137,6 +137,7 @@ if db_type == "Snowflake":
         )
         user = st.text_input("User")
         warehouse = st.text_input("Warehouse")
+        role = st.text_input("Role (optional)")
 
     with col2:
         password = st.text_input(
@@ -145,7 +146,7 @@ if db_type == "Snowflake":
         )
         database = st.text_input("Database")
         schema = st.text_input("Schema")
-        role = st.text_input("Role (optional)")
+        
 
 
 if st.button("Connect"):
@@ -559,6 +560,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
