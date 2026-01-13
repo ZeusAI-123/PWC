@@ -308,25 +308,26 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 
                 create_sql = decision.get("create_sql")
             
-                # 🔥 CRITICAL FIX: normalize to list
-                if isinstance(create_sql, str):
-                    create_sql = [create_sql]
+                # 🔥 Normalize create_sql into ONE string
+                if isinstance(create_sql, list):
+                    create_sql = "\n".join(create_sql)
             
-                for sql in create_sql:
-                    if not sql or not sql.strip():
-                        continue
+                if not create_sql or not create_sql.strip():
+                    st.error("❌ Empty CREATE TABLE SQL generated")
+                    st.stop()
             
-                    sql = sql.strip().rstrip(";")
+                create_sql = create_sql.strip().rstrip(";")
             
-                    if not sql.lower().startswith("create table"):
-                        st.error("❌ Unsafe CREATE detected")
-                        st.code(sql, language="sql")
-                        st.stop()
+                # Safety check
+                if not create_sql.lower().startswith("create table"):
+                    st.error("❌ Unsafe CREATE SQL detected")
+                    st.code(create_sql, language="sql")
+                    st.stop()
             
-                    st.write("🧪 Executing CREATE TABLE")
-                    st.code(sql, language="sql")
+                st.write("🧪 Executing CREATE TABLE")
+                st.code(create_sql, language="sql")
             
-                    cursor.execute(sql)
+                cursor.execute(create_sql)
 
                     
             for sql in decision.get("alter_sql", []):
@@ -430,6 +431,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
