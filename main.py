@@ -109,25 +109,43 @@ db_type = st.radio(
 if db_type == "SQL Server":
     st.subheader("🔌 SQL Server Connection")
 
-    server = st.text_input("Server")
-    database = st.text_input("Database")
-    user = st.text_input("User")
-    password = st.text_input("Password", type="password")
-    driver = st.text_input(
-        "ODBC Driver",
-        "ODBC Driver 17 for SQL Server"
-    )
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        server = st.text_input("Server")
+        database = st.text_input("Database")
+        driver = st.text_input(
+            "ODBC Driver",
+            "ODBC Driver 17 for SQL Server"
+        )
+
+    with col2:
+        user = st.text_input("User")
+        password = st.text_input(
+            "Password",
+            type="password"
+        )
 
 if db_type == "Snowflake":
     st.subheader("❄️ Snowflake Connection")
 
-    account = st.text_input("Account (without .snowflakecomputing.com)")
-    user = st.text_input("User")
-    password = st.text_input("Password", type="password")
-    warehouse = st.text_input("Warehouse")
-    database = st.text_input("Database")
-    schema = st.text_input("Schema")
-    role = st.text_input("Role (optional)")
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        account = st.text_input(
+            "Account (without .snowflakecomputing.com)"
+        )
+        user = st.text_input("User")
+        warehouse = st.text_input("Warehouse")
+
+    with col2:
+        password = st.text_input(
+            "Password",
+            type="password"
+        )
+        database = st.text_input("Database")
+        schema = st.text_input("Schema")
+        role = st.text_input("Role (optional)")
 
 
 if st.button("Connect"):
@@ -541,6 +559,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
