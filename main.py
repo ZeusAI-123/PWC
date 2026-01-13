@@ -5,7 +5,7 @@ from datasources.snowflake import connect_snowflake
 from dotenv import load_dotenv
 import os
 from spark.schema_compare import get_tables, get_table_schema
-from genai.sql_generator import get_ingestion_decision
+from genai.sql_generator import get_ingestion_decision, classify_view_risk_llm
 from spark.schema_compare import get_file_schema
 from spark.lineage import get_impacted_views_snowflake
 from spark.ingest import insert_data
@@ -471,6 +471,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
