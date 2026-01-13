@@ -350,8 +350,6 @@ if "impacted_views" in st.session_state:
     df.columns = [c.lower() for c in df.columns]
     st.session_state["impacted_views"] = df
 
-    st.write("Impacted views columns:", df.columns.tolist())
-
     if df.empty:
         st.success("✅ No downstream views will be impacted.")
     else:
@@ -389,7 +387,6 @@ if "impacted_views" in st.session_state:
             "Risk is classified based on join type and SELECT usage. "
             "Precedence determines severity."
         )
-
 
 if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 
@@ -545,6 +542,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
