@@ -305,11 +305,28 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
             # ---------------------------
             # CREATE TABLE
             if decision["action"] == "CREATE_AND_INSERT":
-                for sql in decision["create_sql"]:
-                    if target_table.lower() not in sql.lower():
-                        st.error("❌ Unsafe CREATE detected")
+                for sql in decision.get("create_sql", []):
+            
+                    # 1️⃣ Skip empty / invalid SQL
+                    if not sql or not sql.strip():
+                        continue
+            
+                    sql = sql.strip().rstrip(";")
+            
+                    # 2️⃣ Strong safety check
+                    if not sql.lower().startswith("create table"):
+                        st.error("❌ Unsafe SQL detected (not CREATE TABLE)")
+                        st.code(sql, language="sql")
                         st.stop()
+            
+                    # Optional: ensure table name appears somewhere
+                    if target_table.split(".")[-1].lower() not in sql.lower():
+                        st.error("❌ CREATE TABLE does not target the selected table")
+                        st.code(sql, language="sql")
+                        st.stop()
+            
                     cursor.execute(sql)
+
                     
             for sql in decision.get("alter_sql", []):
                 if target_table not in sql:
@@ -412,6 +429,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
