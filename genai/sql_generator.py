@@ -113,7 +113,6 @@ Return ONLY valid JSON in this format:
   {{
     "view_name": "",
     "risk_level": "HIGH | MODERATE_HIGH | LOW",
-    "precedence": 1,
     "reason": ""
   }}
 ]
@@ -128,3 +127,4 @@ Views:
     )
 
     return response.output_text
+
