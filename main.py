@@ -136,14 +136,15 @@ if db_type == "Snowflake":
             "Account (without .snowflakecomputing.com)"
         )
         user = st.text_input("User")
-        warehouse = st.text_input("Warehouse")
-        role = st.text_input("Role (optional)")
-
-    with col2:
         password = st.text_input(
             "Password",
             type="password"
         )
+        
+        role = st.text_input("Role (optional)")
+
+    with col2:
+        warehouse = st.text_input("Warehouse")
         database = st.text_input("Database")
         schema = st.text_input("Schema")
         
@@ -560,6 +561,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
