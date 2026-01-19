@@ -128,3 +128,70 @@ Views:
 
     return response.output_text
 
+def get_mongo_ingestion_decision(
+    openai_client,
+    collection_name,
+    file_schema,
+    existing_fields,
+    ingestion_mode
+):
+    """
+    ingestion_mode:
+      - NEW_COLLECTION
+      - EXISTING_COLLECTION
+    """
+
+    prompt = f"""
+You are a senior data engineer working with MongoDB.
+
+TARGET DATABASE TYPE: MongoDB
+TARGET COLLECTION: {collection_name}
+
+INGESTION MODE:
+- {ingestion_mode}
+
+STRICT RULES (DO NOT VIOLATE):
+- NEVER generate SQL
+- NEVER generate CREATE TABLE or ALTER TABLE
+- MongoDB uses collections and documents
+- Collections may be created only if explicitly approved
+- New fields are allowed without schema changes
+
+INPUT FILE FIELDS:
+{file_schema['COLUMN_NAME'].tolist()}
+
+EXISTING COLLECTION FIELDS (empty if new collection):
+{existing_fields}
+
+DECISION GUIDELINES:
+- If ingestion_mode is NEW_COLLECTION, creation must be approved explicitly
+- If ingestion_mode is EXISTING_COLLECTION, collection must already exist
+- If a natural business key exists (id, code, email, uuid), suggest UPSERT
+- If no reliable key exists, suggest INSERT
+- If '_id' field exists in input, warn about conflicts
+- Metadata fields may be added if useful
+
+YOU MUST RETURN ONLY VALID JSON.
+DO NOT include explanations or markdown.
+
+JSON FORMAT (FOLLOW EXACTLY):
+
+{{
+  "action": "CREATE_AND_INSERT | DIRECT_INSERT | UPSERT",
+  "create_collection": true | false,
+  "insert_mode": "insert_many | upsert_many",
+  "natural_key": [],
+  "add_metadata": true | false,
+  "metadata_fields": ["_ingested_at"],
+  "warnings": []
+}}
+"""
+
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    return response.choices[0].message.content
+
