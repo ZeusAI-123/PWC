@@ -170,7 +170,8 @@ if "conn" in st.session_state:
         index=None
     )
 
-    st.session_state.get("ingestion_mode") = ingestion_mode
+    st.session_state["ingestion_mode"] = ingestion_mode
+
 # =========================
 # 3. TABLE SELECTION
 # =========================
@@ -208,10 +209,12 @@ if "conn" in st.session_state or st.session_state.get("db_dialect") == "mongodb"
                 st.stop()
         else:
             collections = db.list_collection_names()
-            collection_name = st.selectbox(
-                "Choose existing collection",
-                collections
-            )
+            if not collections:
+                st.warning("No collections exist. Please create a new collection.")
+                st.stop()
+            
+            collection_name = st.selectbox("Choose existing collection", collections)
+
 
         st.session_state["selected_table"] = collection_name
 
@@ -242,6 +245,7 @@ if uploaded_file and "selected_table" in st.session_state:
 
     if st.session_state["db_dialect"] in ["sqlserver", "snowflake"]:
         conn = st.session_state["conn"]
+        schema_name, table_name = st.session_state["selected_table"].split(".")
         db_schema = get_table_schema(
             conn,
             schema_name,
@@ -251,25 +255,31 @@ if uploaded_file and "selected_table" in st.session_state:
 
 
 
+
     # Force DB schema dtype to varchar (POC rule)
-    db_schema["DATA_TYPE"] = "varchar"
+    if st.session_state["db_dialect"] in ["sqlserver", "snowflake"]:
+        db_schema["DATA_TYPE"] = "varchar"
+
 
     # =========================
     # 5. SHOW SCHEMA DETAILS
     # =========================
-    st.subheader("📊 Schema Comparison")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("### 🗄 Existing Table Schema")
-        st.dataframe(db_schema)
-        st.metric("DB Column Count", len(db_schema))
-
-    with col2:
-        st.markdown("### 📁 Uploaded File Schema")
-        st.dataframe(file_schema)
-        st.metric("File Column Count", len(file_schema))
+    if st.session_state["db_dialect"] in ["sqlserver", "snowflake"]:
+        st.subheader("📊 Schema Comparison")
+        ...
+    
+    
+        col1, col2 = st.columns(2)
+    
+        with col1:
+            st.markdown("### 🗄 Existing Table Schema")
+            st.dataframe(db_schema)
+            st.metric("DB Column Count", len(db_schema))
+    
+        with col2:
+            st.markdown("### 📁 Uploaded File Schema")
+            st.dataframe(file_schema)
+            st.metric("File Column Count", len(file_schema))
 
     # =========================
     # 6. GENAI DECISION
@@ -342,9 +352,14 @@ if "decision" in st.session_state:
     # =========================
     # 8. USER CONFIRMATION
     # =========================
-    confirm = st.checkbox(
-        "I confirm the above SQL should be executed ONLY on the selected table"
+    confirm_text = (
+    "I confirm the above MongoDB action should be executed"
+    if st.session_state["db_dialect"] == "mongodb"
+    else "I confirm the above SQL should be executed ONLY on the selected table"
     )
+    
+    confirm = st.checkbox(confirm_text)
+
 
     # =========================
     # 9. EXECUTION (SAFE)
