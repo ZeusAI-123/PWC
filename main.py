@@ -25,6 +25,9 @@ openai_client = OpenAI(
     max_retries=3  
 )
 
+if "ingestion_mode" not in st.session_state:
+    st.session_state["ingestion_mode"] = None
+
 st.set_page_config(
     page_title="GenAI SQL Ingestion POC",
     layout="wide"
@@ -167,7 +170,7 @@ if "conn" in st.session_state:
         index=None
     )
 
-    st.session_state["ingestion_mode"] = ingestion_mode
+    st.session_state.get("ingestion_mode") = ingestion_mode
 # =========================
 # 3. TABLE SELECTION
 # =========================
@@ -177,7 +180,7 @@ if "conn" in st.session_state or st.session_state.get("db_dialect") == "mongodb"
     if st.session_state["db_dialect"] in ["sqlserver", "snowflake"] and "tables" in st.session_state:
         tables_df = st.session_state["tables"]
 
-        if st.session_state["ingestion_mode"] == "Ingest into Existing Table":
+        if st.session_state.get("ingestion_mode") == "Ingest into Existing Table":
             selected_table = st.selectbox(
                 "Choose existing table",
                 tables_df["full_name"]
@@ -196,7 +199,7 @@ if "conn" in st.session_state or st.session_state.get("db_dialect") == "mongodb"
     elif st.session_state["db_dialect"] == "mongodb":
         db = st.session_state["mongo_db"]
 
-        if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
+        if st.session_state.get("ingestion_mode") == "Create New Table (GenAI)":
             collection_name = st.text_input(
                 "Enter new collection name",
                 placeholder="e.g. users, transactions"
@@ -304,7 +307,7 @@ if uploaded_file and "selected_table" in st.session_state:
                 file_schema,
                 st.session_state["selected_table"],
                 dialect,
-                st.session_state["ingestion_mode"]
+                st.session_state.get("ingestion_mode")
             )
     
         decision = safe_json_loads(decision_raw)
