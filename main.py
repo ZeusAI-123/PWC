@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 from datasources.sqlserver import get_sqlserver_connection
 from datasources.snowflake import connect_snowflake
+from datasources.mongodb import get_mongodb_connection
 from dotenv import load_dotenv
 import os
 from spark.schema_compare import get_tables, get_table_schema
-from genai.sql_generator import get_ingestion_decision
+from genai.sql_generator import get_ingestion_decision, get_mongo_ingestion_decision
 from spark.schema_compare import get_file_schema
 from spark.ingest import insert_data
 from openai import OpenAI
@@ -59,8 +60,9 @@ def rebuild_insert_sql(table_name, columns, dialect):
 
 db_type = st.radio(
     "Select Database Type",
-    ["SQL Server", "Snowflake"]
+    ["SQL Server", "Snowflake", "MongoDB"]
 )
+
 
 if db_type == "SQL Server":
     st.subheader("🔌 SQL Server Connection")
@@ -85,67 +87,130 @@ if db_type == "Snowflake":
     schema = st.text_input("Schema")
     role = st.text_input("Role (optional)")
 
+if db_type == "MongoDB":
+    st.subheader("🍃 MongoDB Connection")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        mongo_host = st.text_input("Host", "localhost")
+        mongo_port = st.number_input("Port", value=27017)
+        mongo_database = st.text_input("Database", "enterprise_db")
+
+    with col2:
+        mongo_user = st.text_input("User", "enterprise_app")
+        mongo_password = st.text_input("Password", type="password")
+
 
 if st.button("Connect"):
     try:
+        # ---------- SQL SERVER ----------
         if db_type == "SQL Server":
             conn = get_sqlserver_connection(
                 server, database, user, password, driver
             )
             dialect = "sqlserver"
-        else:
+
+            st.session_state["conn"] = conn
+            st.session_state["db_dialect"] = dialect
+
+            tables_df = get_tables(conn, dialect)
+            tables_df["full_name"] = (
+                tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+            )
+
+            st.session_state["tables"] = tables_df
+            st.success("✅ Connected to SQL Server")
+
+        # ---------- SNOWFLAKE ----------
+        elif db_type == "Snowflake":
             conn = connect_snowflake(
                 account, user, password,
                 warehouse, database, schema, role or None
             )
             dialect = "snowflake"
 
-        st.session_state["conn"] = conn
-        st.session_state["db_dialect"] = dialect
+            st.session_state["conn"] = conn
+            st.session_state["db_dialect"] = dialect
 
-        tables_df = get_tables(conn, dialect)
-
-        if dialect == "sqlserver":
-            tables_df["full_name"] = (
-                tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-            )
-        else:
+            tables_df = get_tables(conn, dialect)
             tables_df["full_name"] = tables_df["TABLE_NAME"]
 
-        st.session_state["tables"] = tables_df
-        st.success(f"✅ Connected to {db_type}")
+            st.session_state["tables"] = tables_df
+            st.success("✅ Connected to Snowflake")
+
+        # ---------- MONGODB ----------
+        else:
+            db = get_mongodb_connection(
+                mongo_host,
+                mongo_port,
+                mongo_database,
+                mongo_user,
+                mongo_password
+            )
+
+            st.session_state["mongo_db"] = db
+            st.session_state["db_dialect"] = "mongodb"
+
+            st.success("✅ Connected to MongoDB")
 
     except Exception as e:
         st.error(f"❌ Connection failed: {e}")
         st.stop()
+
+if "conn" in st.session_state:
+    st.subheader("🧭 Ingestion Mode")
+
+    ingestion_mode = st.radio(
+        "Choose ingestion type",
+        ["Ingest into Existing Table", "Create New Table (GenAI)"],
+        index=None
+    )
+
+    st.session_state["ingestion_mode"] = ingestion_mode
 # =========================
 # 3. TABLE SELECTION
 # =========================
-if "tables" in st.session_state:
-    st.subheader("📋 Select Target Table")
+if "conn" in st.session_state or st.session_state.get("db_dialect") == "mongodb":
 
-    tables_df = st.session_state["tables"]
+    # ---------- SQL ----------
+    if st.session_state["db_dialect"] in ["sqlserver", "snowflake"] and "tables" in st.session_state:
+        tables_df = st.session_state["tables"]
 
-    # 🔒 Always ensure full_name exists
-    if "full_name" not in tables_df.columns:
-        tables_df["full_name"] = (
-            tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-        )
-        st.session_state["tables"] = tables_df  # update session state
+        if st.session_state["ingestion_mode"] == "Ingest into Existing Table":
+            selected_table = st.selectbox(
+                "Choose existing table",
+                tables_df["full_name"]
+            )
+        else:
+            selected_table = st.text_input(
+                "Enter new table name",
+                placeholder="schema.new_table"
+            )
+            if not selected_table:
+                st.stop()
 
-    selected_table = st.selectbox(
-        "Choose the table to ingest into",
-        tables_df["full_name"]
-    )
+        st.session_state["selected_table"] = selected_table
 
-    st.session_state["selected_table"] = selected_table
-    dialect = st.session_state["db_dialect"]
+    # ---------- MONGODB ----------
+    elif st.session_state["db_dialect"] == "mongodb":
+        db = st.session_state["mongo_db"]
 
-    if dialect == "sqlserver":
-        schema_name, table_name = selected_table.split(".")
-    else:
-        schema_name = None
-        table_name = selected_table
+        if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
+            collection_name = st.text_input(
+                "Enter new collection name",
+                placeholder="e.g. users, transactions"
+            )
+            if not collection_name:
+                st.stop()
+        else:
+            collections = db.list_collection_names()
+            collection_name = st.selectbox(
+                "Choose existing collection",
+                collections
+            )
+
+        st.session_state["selected_table"] = collection_name
 
 
 # =========================
@@ -172,14 +237,15 @@ if uploaded_file and "selected_table" in st.session_state:
         "DATA_TYPE": ["varchar"] * len(df_file.columns)
     })
 
-    conn = st.session_state["conn"]
+    if st.session_state["db_dialect"] in ["sqlserver", "snowflake"]:
+        conn = st.session_state["conn"]
+        db_schema = get_table_schema(
+            conn,
+            schema_name,
+            table_name,
+            st.session_state["db_dialect"]
+        )
 
-    db_schema = get_table_schema(
-        conn,
-        schema_name,
-        table_name,
-        st.session_state["db_dialect"]
-    )
 
 
     # Force DB schema dtype to varchar (POC rule)
@@ -205,17 +271,46 @@ if uploaded_file and "selected_table" in st.session_state:
     # =========================
     # 6. GENAI DECISION
     # =========================
-    if st.button("🤖 Ask GenAI"):
-        decision_raw = get_ingestion_decision(openai_client,
-            db_schema,
-            file_schema,
-            st.session_state["selected_table"],
-            st.session_state["db_dialect"]
-        )
+    if st.button("🤖 Ask Zeus"):
 
+        if st.session_state["db_dialect"] == "mongodb":
+            db = st.session_state["mongo_db"]
+            collection_name = st.session_state["selected_table"]
+    
+            existing_fields = (
+                list(db[collection_name].find_one({}, {"_id": 0}).keys())
+                if collection_name in db.list_collection_names()
+                else []
+            )
+    
+            mongo_mode = (
+                "NEW_COLLECTION"
+                if st.session_state["ingestion_mode"] == "Create New Table (GenAI)"
+                else "EXISTING_COLLECTION"
+            )
+    
+            decision_raw = get_mongo_ingestion_decision(
+                openai_client,
+                collection_name,
+                file_schema,
+                existing_fields,
+                mongo_mode
+            )
+    
+        else:
+            decision_raw = get_ingestion_decision(
+                openai_client,
+                db_schema,
+                file_schema,
+                st.session_state["selected_table"],
+                dialect,
+                st.session_state["ingestion_mode"]
+            )
+    
         decision = safe_json_loads(decision_raw)
         st.session_state["decision"] = decision
         st.session_state["df_file"] = df_file
+
 
 # =========================
 # 7. SHOW GENAI SQL (PREVIEW)
@@ -228,14 +323,18 @@ if "decision" in st.session_state:
 
     st.write("**Target Table:**", target_table)
     st.write("**Action:**", decision["action"])
+    if st.session_state["db_dialect"] == "mongodb":
+        st.json(decision)
+    else:
+        if decision["alter_sql"]:
+            st.markdown("### 🛠 ALTER TABLE SQL")
+            for sql in decision["alter_sql"]:
+                st.code(sql, language="sql")
+    
+        st.markdown("### 📥 INSERT SQL")
+        st.code(decision["insert_sql"], language="sql")
 
-    if decision["alter_sql"]:
-        st.markdown("### 🛠 ALTER TABLE SQL")
-        for sql in decision["alter_sql"]:
-            st.code(sql, language="sql")
-
-    st.markdown("### 📥 INSERT SQL")
-    st.code(decision["insert_sql"], language="sql")
+    
 
     # =========================
     # 8. USER CONFIRMATION
@@ -249,77 +348,110 @@ if "decision" in st.session_state:
     # =========================
     if st.button("🚀 Execute Ingestion", disabled=not confirm):
         try:
-            conn = st.session_state["conn"]
-            cursor = conn.cursor()
-
-            # ---------------------------
-            # 1. Execute ALTER safely
-            # ---------------------------
-            for sql in decision["alter_sql"]:
-                if target_table not in sql:
-                    st.error("❌ Unsafe ALTER detected. Execution blocked.")
-                    st.stop()
-                cursor.execute(sql)
-
-            insert_sql = decision["insert_sql"]
-            dialect = st.session_state["db_dialect"]
-
-            # ---------------------------
-            # 2. Extract INSERT columns
-            # ---------------------------
-            cols_part = insert_sql.split("(")[1].split(")")[0]
-            raw_columns = [c.strip() for c in cols_part.split(",")]
-
-            if dialect == "sqlserver":
-                insert_columns = [c.strip("[]") for c in raw_columns]
-            else:  # snowflake
-                insert_columns = [c.strip('"') for c in raw_columns]
-
-            # ---------------------------
-            # 3. Normalize column names (CRITICAL)
-            # ---------------------------
-            df = st.session_state["df_file"]
-
-            df.columns = [c.strip().upper() for c in df.columns]
-            insert_columns = [c.strip().upper() for c in insert_columns]
-
-            # ---------------------------
-            # 4. STRICT alignment (NO reindex)
-            # ---------------------------
-            try:
-                df_aligned = df[insert_columns]
-            except KeyError as e:
-                st.error(f"❌ Column alignment failed: {e}")
+            if st.session_state["db_dialect"] == "mongodb":
+                db = st.session_state["mongo_db"]
+                decision = st.session_state["decision"]
+                collection_name = st.session_state["selected_table"]
+            
+                records = st.session_state["df_file"].to_dict(orient="records")
+            
+                if decision.get("create_collection"):
+                    if collection_name not in db.list_collection_names():
+                        db.create_collection(collection_name)
+            
+                collection = db[collection_name]
+            
+                if decision.get("add_metadata"):
+                    from datetime import datetime
+                    for r in records:
+                        r["_ingested_at"] = datetime.utcnow()
+            
+                if decision["insert_mode"] == "insert_many":
+                    collection.insert_many(records)
+                else:
+                    key = decision["natural_key"][0]
+                    for r in records:
+                        collection.update_one(
+                            {key: r[key]},
+                            {"$set": r},
+                            upsert=True
+                        )
+            
+                st.success("✅ MongoDB ingestion completed")
                 st.stop()
 
-            # ---------------------------
-            # 5. Fix placeholder mismatch
-            # ---------------------------
-            placeholder = "?" if dialect == "sqlserver" else "%s"
-
-            if insert_sql.count(placeholder) != len(insert_columns):
-                # Use fully qualified table for Snowflake
-                target = target_table if dialect == "sqlserver" else \
-                    '"GENAI_INGESTION_DB"."PUBLIC"."ZFBL5N_MAIN"'
-
-                insert_sql = rebuild_insert_sql(
-                    target,
-                    insert_columns,
+            else:
+                conn = st.session_state["conn"]
+                cursor = conn.cursor()
+    
+                # ---------------------------
+                # 1. Execute ALTER safely
+                # ---------------------------
+                for sql in decision["alter_sql"]:
+                    if target_table not in sql:
+                        st.error("❌ Unsafe ALTER detected. Execution blocked.")
+                        st.stop()
+                    cursor.execute(sql)
+    
+                insert_sql = decision["insert_sql"]
+                dialect = st.session_state["db_dialect"]
+    
+                # ---------------------------
+                # 2. Extract INSERT columns
+                # ---------------------------
+                cols_part = insert_sql.split("(")[1].split(")")[0]
+                raw_columns = [c.strip() for c in cols_part.split(",")]
+    
+                if dialect == "sqlserver":
+                    insert_columns = [c.strip("[]") for c in raw_columns]
+                else:  # snowflake
+                    insert_columns = [c.strip('"') for c in raw_columns]
+    
+                # ---------------------------
+                # 3. Normalize column names (CRITICAL)
+                # ---------------------------
+                df = st.session_state["df_file"]
+    
+                df.columns = [c.strip().upper() for c in df.columns]
+                insert_columns = [c.strip().upper() for c in insert_columns]
+    
+                # ---------------------------
+                # 4. STRICT alignment (NO reindex)
+                # ---------------------------
+                try:
+                    df_aligned = df[insert_columns]
+                except KeyError as e:
+                    st.error(f"❌ Column alignment failed: {e}")
+                    st.stop()
+    
+                # ---------------------------
+                # 5. Fix placeholder mismatch
+                # ---------------------------
+                placeholder = "?" if dialect == "sqlserver" else "%s"
+    
+                if insert_sql.count(placeholder) != len(insert_columns):
+                    # Use fully qualified table for Snowflake
+                    target = target_table if dialect == "sqlserver" else \
+                        '"GENAI_INGESTION_DB"."PUBLIC"."ZFBL5N_MAIN"'
+    
+                    insert_sql = rebuild_insert_sql(
+                        target,
+                        insert_columns,
+                        dialect
+                    )
+                    st.warning("⚠️ INSERT SQL rebuilt for correctness.")
+    
+                # ---------------------------
+                # 6. FINAL INSERT
+                # ---------------------------
+                insert_data(
+                    conn,
+                    insert_sql,
+                    df_aligned,
                     dialect
                 )
-                st.warning("⚠️ INSERT SQL rebuilt for correctness.")
-
-            # ---------------------------
-            # 6. FINAL INSERT
-            # ---------------------------
-            insert_data(
-                conn,
-                insert_sql,
-                df_aligned,
-                dialect
-            )
-
-            st.success(f"✅ Inserted {len(df_aligned)} rows successfully")
+    
+                st.success(f"✅ Inserted {len(df_aligned)} rows successfully")
 
         except Exception as e:
             st.error(f"❌ Execution failed: {e}")
