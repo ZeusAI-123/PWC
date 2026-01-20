@@ -12,6 +12,8 @@ from spark.ingest import insert_data
 from openai import OpenAI
 import re
 import json
+import time
+
 # Load environment variables first
 st.session_state.setdefault("ingestion_mode", None)
 st.session_state.setdefault("selected_table", None)
@@ -100,6 +102,64 @@ def build_risk_df(impacted_views_df, llm_result_json):
 
     return final_df
 
+def fetch_top_n_rows(conn, table_name, dialect, n=10):
+    cursor = conn.cursor()
+
+    if dialect == "sqlserver":
+        sql = f"SELECT TOP {n} * FROM {table_name}"
+    else:  # snowflake
+        sql = f"SELECT * FROM {table_name} LIMIT {n}"
+
+    cursor.execute(sql)
+    rows = cursor.fetchall()
+    columns = [col[0] for col in cursor.description]
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def detect_pii_llm(openai_client, table_name, sample_payload):
+    prompt = f"""
+You are a data privacy expert.
+
+Analyze the following table samples and identify PII columns.
+
+TABLE:
+{table_name}
+
+COLUMN SAMPLES:
+{json.dumps(sample_payload, indent=2)}
+
+RULES:
+- Identify PII based on DATA PATTERNS, not column names alone
+- Mark as:
+  - PII
+  - POSSIBLE_PII
+  - NON_PII
+- Provide a short reason
+- Be conservative
+
+RETURN ONLY VALID JSON.
+
+FORMAT:
+{{
+  "columns": [
+    {{
+      "column_name": "EMAIL",
+      "pii_type": "EMAIL | PHONE | NAME | ID | FINANCIAL | DOB | ADDRESS | OTHER | NONE",
+      "classification": "PII | POSSIBLE_PII | NON_PII",
+      "confidence": "HIGH | MEDIUM | LOW",
+      "reason": "Short explanation"
+    }}
+  ]
+}}
+"""
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    return response.choices[0].message.content
 
 db_type = st.radio(
     "Select Database Type",
@@ -186,11 +246,15 @@ if st.button("Connect"):
 # 3. INGESTION MODE
 # =========================
 if "conn" in st.session_state:
-    st.subheader("🧭 Ingestion Mode")
+    st.subheader("🧭 Select Operation")
 
     ingestion_mode = st.radio(
         "Choose ingestion type",
-        ["Ingest into Existing Table", "Create New Table (GenAI)"],
+        [
+            "Ingest into Existing Table",
+            "Create New Table & Ingest",
+            "Detect PII from Existing Table"
+        ],
         index=None
     )
 
@@ -198,47 +262,176 @@ if "conn" in st.session_state:
 # =========================
 # 3. TABLE SELECTION
 # =========================
+# =========================
+# PII DETECTION — ALL TABLES
+# =========================
+if st.session_state.get("ingestion_mode") == "Detect PII from Existing Table":
+
+    st.subheader("🔐 PII Scan Across All Tables")
+    st.session_state.pop("pii_scan_results", None)
+    if st.button("🚨 Scan All Tables for PII"):
+        pii_results = []
+
+        tables_df = st.session_state["tables"]
+        conn = st.session_state["conn"]
+        dialect = st.session_state["db_dialect"]
+
+        progress = st.progress(0)
+        total = len(tables_df)
+
+        for idx, row in tables_df.iterrows():
+            table_name = row["full_name"]
+
+            try:
+                # 1️⃣ Fetch top 10 rows
+                sample_df = fetch_top_n_rows(
+                    conn=conn,
+                    table_name=table_name,
+                    dialect=dialect,
+                    n=10
+                )
+
+                if sample_df.empty:
+                    continue
+
+                # 2️⃣ Build LLM payload
+                sample_payload = {
+                    col: (
+                        sample_df[col]
+                        .dropna()
+                        .astype(str)
+                        .head(5)
+                        .tolist()
+                    )
+                    for col in sample_df.columns
+                }
+
+                # 3️⃣ Call LLM
+                pii_raw = detect_pii_llm(
+                    openai_client=openai_client,
+                    table_name=table_name,
+                    sample_payload=sample_payload
+                )
+
+                pii_json = safe_json_loads(pii_raw)
+
+                # 4️⃣ Normalize results
+                for col in pii_json.get("columns", []):
+                    pii_results.append({
+                        "table_name": table_name,
+                        "column_name": col.get("column_name"),
+                        "pii_type": col.get("pii_type"),
+                        "classification": col.get("classification"),
+                        "confidence": col.get("confidence"),
+                        "reason": col.get("reason")
+                    })
+                time.sleep(0.3)
+
+            except Exception as e:
+                pii_results.append({
+                    "table_name": table_name,
+                    "column_name": None,
+                    "pii_type": None,
+                    "classification": "ERROR",
+                    "confidence": "LOW",
+                    "reason": str(e)
+                })
+
+            progress.progress((idx + 1) / total)
+
+        st.session_state["pii_scan_results"] = pd.DataFrame(pii_results)
+
 if st.session_state["ingestion_mode"] and "tables" in st.session_state:
-    # st.subheader("📋 Select Table")
+    
+    
+        # st.subheader("📋 Select Table")
+    
+        tables_df = st.session_state["tables"]
+    
+        # 🔒 Always ensure full_name exists
+        # if "full_name" not in tables_df.columns:
+        #     tables_df["full_name"] = (
+        #         tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+        #     )
+        #     st.session_state["tables"] = tables_df  # update session state
+    
+        if st.session_state.get("ingestion_mode") == "Ingest into Existing Table":
+    
+            selected_table = st.selectbox(
+                "Choose existing table",
+                tables_df["full_name"]
+            )
+            st.session_state["selected_table"] = selected_table
+        else:
+            selected_table = st.text_input(
+                "Enter new table name",
+                placeholder="schema.new_table"
+            )
+            if not selected_table:
+                st.info("ℹ️ Enter a table name to continue")
+                st.stop()
+    
+        st.session_state["selected_table"] = selected_table
+    
+        dialect = st.session_state["db_dialect"]
+    
+        if dialect == "sqlserver":
+            schema_name, table_name = selected_table.split(".")
+        else:
+            schema_name = None
+            table_name = selected_table
+    
+# # =========================
+# # PII DETECTION MODE (READ-ONLY)
+# # =========================
+# if st.session_state.get("ingestion_mode") == "Detect PII from Existing Table":
 
-    tables_df = st.session_state["tables"]
+#     st.subheader("🔐 PII Detection (Top 10 Rows)")
 
-    # 🔒 Always ensure full_name exists
-    # if "full_name" not in tables_df.columns:
-    #     tables_df["full_name"] = (
-    #         tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-    #     )
-    #     st.session_state["tables"] = tables_df  # update session state
+#     if st.button("🔍 Analyze PII"):
+#         try:
+#             sample_df = fetch_top_n_rows(
+#                 conn=st.session_state["conn"],
+#                 table_name=st.session_state["selected_table"],
+#                 dialect=st.session_state["db_dialect"],
+#                 n=10
+#             )
 
-    if st.session_state["ingestion_mode"] == "Ingest into Existing Table":
-        selected_table = st.selectbox(
-            "Choose existing table",
-            tables_df["full_name"]
-        )
-    else:
-        selected_table = st.text_input(
-            "Enter new table name",
-            placeholder="schema.new_table"
-        )
-        if not selected_table:
-            st.info("ℹ️ Enter a table name to continue")
-            st.stop()
+#             if sample_df.empty:
+#                 st.warning("No data found in table.")
+#                 st.stop()
 
-    st.session_state["selected_table"] = selected_table
+#             # Prepare payload for LLM
+#             sample_payload = {
+#                 col: sample_df[col]
+#                 .dropna()
+#                 .astype(str)
+#                 .head(5)
+#                 .tolist()
+#                 for col in sample_df.columns
+#             }
 
-    dialect = st.session_state["db_dialect"]
+#             pii_raw = detect_pii_llm(
+#                 openai_client=openai_client,
+#                 table_name=st.session_state["selected_table"],
+#                 sample_payload=sample_payload
+#             )
 
-    if dialect == "sqlserver":
-        schema_name, table_name = selected_table.split(".")
-    else:
-        schema_name = None
-        table_name = selected_table
+#             pii_result = safe_json_loads(pii_raw)
+#             st.session_state["pii_result"] = pii_result
+
+#         except Exception as e:
+#             st.error(f"❌ PII detection failed: {e}")
 
 
 # =========================
 # 4. FILE UPLOAD
 # =========================
-if st.session_state.get("selected_table"):
+if (
+    st.session_state.get("selected_table")
+    and st.session_state.get("ingestion_mode") != "Detect PII from Existing Table"
+):
+
     st.subheader("📤 Upload File to ingest")
     
     uploaded_file = st.file_uploader(
@@ -263,7 +456,7 @@ if st.session_state.get("selected_table"):
         conn = st.session_state["conn"]
     
         # 🔥 KEY LOGIC
-        if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
+        if st.session_state["ingestion_mode"] == "Create New Table & Ingest":
             db_schema = pd.DataFrame(columns=["COLUMN_NAME", "DATA_TYPE"])
         else:
             db_schema = get_table_schema(
@@ -318,7 +511,11 @@ if st.session_state.get("selected_table"):
     # =========================
     # 6. GENAI DECISION
     # =========================
-    if st.button("🤖 Ask Zeus"):
+    if (
+    st.session_state.get("ingestion_mode") != "Detect PII from Existing Table"
+    and st.button("🤖 Ask Zeus")
+):
+
         decision_raw = get_ingestion_decision(openai_client,
                 db_schema,
                 file_schema,
@@ -349,7 +546,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
         for sql in decision["create_sql"]:
             st.code(sql, language="sql")
 
-    if decision["alter_sql"]:
+    if decision.get("alter_sql"):
         st.markdown("### 🛠 ALTER TABLE SQL")
         for sql in decision["alter_sql"]:
             st.code(sql, language="sql")
@@ -505,6 +702,36 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
         except Exception as e:
             st.error(f"❌ Execution failed: {e}")
 
+# =========================
+# SHOW PII RESULTS
+# =========================
+# =========================
+# FINAL PII REPORT
+# =========================
+if (
+    st.session_state.get("ingestion_mode") == "Detect PII from Existing Table"
+    and "pii_scan_results" in st.session_state
+):
+    st.subheader("🚨 PII Scan Results (All Tables)")
+
+    result_df = st.session_state["pii_scan_results"]
+
+    if result_df.empty:
+        st.success("✅ No PII detected in scanned tables.")
+    else:
+        st.dataframe(result_df)
+
+        st.metric(
+            "Tables Scanned",
+            result_df["table_name"].nunique()
+        )
+
+        st.metric(
+            "PII Columns Detected",
+            len(result_df[result_df["classification"].isin(["PII", "POSSIBLE_PII"])])
+        )
+
+
 
 # st.set_page_config(page_title="GenAI Ingestion POC", layout="wide")
 # st.title("🧠 GenAI-Driven SQL Ingestion")
@@ -561,6 +788,7 @@ if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
