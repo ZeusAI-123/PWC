@@ -365,7 +365,7 @@ if st.session_state["ingestion_mode"] and "tables" in st.session_state:
                 tables_df["full_name"]
             )
             st.session_state["selected_table"] = selected_table
-        else:
+        elif st.session_state.get("ingestion_mode") == "Create New Table & Ingest":
             selected_table = st.text_input(
                 "Enter new table name",
                 placeholder="schema.new_table"
@@ -791,6 +791,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
