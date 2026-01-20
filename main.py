@@ -143,11 +143,19 @@ if st.button("Connect"):
             st.success("✅ Connected to Snowflake")
 
         # ---------- MONGODB ----------
+        # ---------- MONGODB ----------
         else:
-            db = get_mongodb_connection(st.secrets["MONGO_URI"])
+            # Use the text inputs instead of st.secrets
+            db = get_mongodb_connection(
+                host=mongo_host,
+                port=int(mongo_port),
+                database=mongo_database,
+                username=mongo_user,
+                password=mongo_password
+            )
             st.session_state["mongo_db"] = db
             st.session_state["db_dialect"] = "mongodb"
-            st.success("✅ Connected to MongoDB Atlas")
+            st.success("✅ Connected to MongoDB")
 
 
     except Exception as e:
