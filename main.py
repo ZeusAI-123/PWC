@@ -19,6 +19,9 @@ st.session_state.setdefault("ingestion_mode", None)
 st.session_state.setdefault("selected_table", None)
 st.session_state.setdefault("decision", None)
 st.session_state.setdefault("confirm", False)
+schema_name = None
+table_name = None
+
 load_dotenv()
 
 
@@ -788,6 +791,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
