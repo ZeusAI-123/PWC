@@ -148,7 +148,7 @@ FORMAT:
   "columns": [
     {{
       "column_name": "EMAIL",
-      "pii_type": "EMAIL | PHONE | NAME | ID | FINANCIAL | DOB | ADDRESS | OTHER | NONE",
+      "pii_type": "EMAIL | PHONE | NAME | ID | FINANCIAL | DOB | ADDRESS | OTHER | NONE | SSN | AADHAAR | PAN",
       "classification": "PII | POSSIBLE_PII | NON_PII",
       "confidence": "HIGH | MEDIUM | LOW",
       "reason": "Short explanation"
@@ -794,6 +794,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
