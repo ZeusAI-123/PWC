@@ -144,18 +144,11 @@ if st.button("Connect"):
 
         # ---------- MONGODB ----------
         else:
-            db = get_mongodb_connection(
-                mongo_host,
-                mongo_port,
-                mongo_database,
-                mongo_user,
-                mongo_password
-            )
-
+            db = get_mongodb_connection(st.secrets["MONGO_URI"])
             st.session_state["mongo_db"] = db
             st.session_state["db_dialect"] = "mongodb"
+            st.success("✅ Connected to MongoDB Atlas")
 
-            st.success("✅ Connected to MongoDB")
 
     except Exception as e:
         st.error(f"❌ Connection failed: {e}")
