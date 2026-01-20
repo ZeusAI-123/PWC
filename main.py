@@ -380,11 +380,12 @@ if st.session_state["ingestion_mode"] and "tables" in st.session_state:
     
         dialect = st.session_state["db_dialect"]
     
-        if dialect == "sqlserver":
-            schema_name, table_name = selected_table.split(".")
-        else:
-            schema_name = None
-            table_name = selected_table
+        if "selected_table" in locals():
+            if dialect == "sqlserver":
+                schema_name, table_name = selected_table.split(".")
+            else:
+                schema_name = None
+                table_name = selected_table
     
 # # =========================
 # # PII DETECTION MODE (READ-ONLY)
@@ -793,6 +794,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
