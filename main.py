@@ -39,6 +39,49 @@ st.set_page_config(
 )
 
 st.title("🧠 ZeusAI-Driven DATA Ingestion")
+# =========================
+# 🔄 REFRESH WORKFLOW (KEEP CONNECTION)
+# =========================
+with st.container():
+    col1, col2 = st.columns([1, 9])
+
+    with col1:
+        if st.button("🔄 Refresh"):
+
+            # 🔥 Reset workflow state
+            keys_to_reset = [
+                "ingestion_mode",
+                "selected_table",
+                "decision",
+                "confirm",
+                "df_file",
+                "pii_scan_results",
+                "impacted_views"
+            ]
+        
+            for key in keys_to_reset:
+                st.session_state.pop(key, None)
+        
+            # 🔁 RELOAD TABLES FROM DB (THIS IS THE KEY)
+            conn = st.session_state.get("conn")
+            dialect = st.session_state.get("db_dialect")
+        
+            if conn and dialect:
+                tables_df = get_tables(conn, dialect)
+        
+                if dialect == "sqlserver":
+                    tables_df["full_name"] = (
+                        tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+                    )
+                else:
+                    tables_df["full_name"] = tables_df["TABLE_NAME"]
+        
+                st.session_state["tables"] = tables_df
+        
+            st.success("Workflow reset. Metadata refreshed.")
+            st.experimental_rerun()
+
+
 
 def safe_json_loads(text: str):
     """
@@ -794,6 +837,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
