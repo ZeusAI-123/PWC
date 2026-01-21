@@ -79,7 +79,7 @@ with st.container():
                 st.session_state["tables"] = tables_df
         
             st.success("Workflow reset. Metadata refreshed.")
-            st.experimental_rerun()
+            st.rerun()
 
 def save_to_sqlite(df, db_path="zeusai_results.db", table_name="pii_scan_results"):
     """
@@ -872,6 +872,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
