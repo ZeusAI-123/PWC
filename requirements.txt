@@ -5,4 +5,5 @@ pandas
 python-dotenv
 openai
 pymongo
-sqlite
+
+
