@@ -396,38 +396,59 @@ if st.session_state.get("ingestion_mode") == "Detect PII from Existing Table":
 
         st.session_state["pii_scan_results"] = pd.DataFrame(pii_results)
 
+# if st.session_state["ingestion_mode"] and "tables" in st.session_state:
+#         # st.subheader("📋 Select Table")
+    
+#         tables_df = st.session_state["tables"]
+    
+#         # 🔒 Always ensure full_name exists
+#         # if "full_name" not in tables_df.columns:
+#         #     tables_df["full_name"] = (
+#         #         tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+#         #     )
+#         #     st.session_state["tables"] = tables_df  # update session state
+    
+#         if st.session_state.get("ingestion_mode") == "Ingest into Existing Table":
+    
+#             selected_table = st.selectbox(
+#                 "Choose existing table",
+#                 tables_df["full_name"]
+#             )
+#             # st.session_state["selected_table"] = selected_table
+#         elif st.session_state.get("ingestion_mode") == "Create New Table & Ingest":
+#             selected_table = st.text_input(
+#                 "Enter new table name",
+#                 placeholder="schema.new_table"
+#             )
+#             if not selected_table:
+#                 st.info("ℹ️ Enter a table name to continue")
+#                 st.stop()
+    
+#         if "selected_table" in locals():
+#             st.session_state["selected_table"] = selected_table
+selected_table = None  # 🔒 ALWAYS initialize
+
 if st.session_state["ingestion_mode"] and "tables" in st.session_state:
-    
-    
-        # st.subheader("📋 Select Table")
-    
-        tables_df = st.session_state["tables"]
-    
-        # 🔒 Always ensure full_name exists
-        # if "full_name" not in tables_df.columns:
-        #     tables_df["full_name"] = (
-        #         tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-        #     )
-        #     st.session_state["tables"] = tables_df  # update session state
-    
-        if st.session_state.get("ingestion_mode") == "Ingest into Existing Table":
-    
-            selected_table = st.selectbox(
-                "Choose existing table",
-                tables_df["full_name"]
-            )
-            # st.session_state["selected_table"] = selected_table
-        elif st.session_state.get("ingestion_mode") == "Create New Table & Ingest":
-            selected_table = st.text_input(
-                "Enter new table name",
-                placeholder="schema.new_table"
-            )
-            if not selected_table:
-                st.info("ℹ️ Enter a table name to continue")
-                st.stop()
-    
-        if "selected_table" in locals():
-            st.session_state["selected_table"] = selected_table
+
+    tables_df = st.session_state["tables"]
+
+    if st.session_state["ingestion_mode"] == "Ingest into Existing Table":
+        selected_table = st.selectbox(
+            "Choose existing table",
+            tables_df["full_name"]
+        )
+
+    elif st.session_state["ingestion_mode"] == "Create New Table & Ingest":
+        selected_table = st.text_input(
+            "Enter new table name",
+            placeholder="schema.new_table"
+        )
+        if not selected_table:
+            st.info("ℹ️ Enter a table name to continue")
+            st.stop()
+
+    if selected_table:
+        st.session_state["selected_table"] = selected_table
 
     
         dialect = st.session_state["db_dialect"]
@@ -530,7 +551,7 @@ if (
     # =========================
         st.subheader("📊 Data Catalog")
 
-        if st.session_state["ingestion_mode"] == "Create New Table (GenAI)":
+        if st.session_state["ingestion_mode"] == "Create New Table & Ingest":
             # ✅ Only file schema
             st.markdown("### 📁 Catalog from File")
             st.dataframe(file_schema)
@@ -851,6 +872,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
