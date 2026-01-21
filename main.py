@@ -13,7 +13,7 @@ from openai import OpenAI
 import re
 import json
 import time
-
+import sqlite3
 # Load environment variables first
 st.session_state.setdefault("ingestion_mode", None)
 st.session_state.setdefault("selected_table", None)
@@ -81,6 +81,15 @@ with st.container():
             st.success("Workflow reset. Metadata refreshed.")
             st.experimental_rerun()
 
+def save_to_sqlite(df, db_path="zeusai_results.db", table_name="pii_scan_results"):
+    """
+    Save DataFrame to SQLite.
+    - Creates DB if not exists
+    - Replaces table by default
+    """
+    conn = sqlite3.connect(db_path)
+    df.to_sql(table_name, conn, if_exists="replace", index=False)
+    conn.close()
 
 
 def safe_json_loads(text: str):
@@ -769,6 +778,11 @@ if (
         st.success("✅ No PII detected in scanned tables.")
     else:
         st.dataframe(result_df)
+        save_to_sqlite(
+            df=result_df,
+            db_path="zeusai_results.db",
+            table_name="pii_scan_results"
+        )
 
         st.metric(
             "Tables Scanned",
@@ -837,6 +851,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
