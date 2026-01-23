@@ -90,6 +90,28 @@ def save_to_sqlite(df, db_path="zeusai_results.db", table_name="pii_scan_results
     conn = sqlite3.connect(db_path)
     df.to_sql(table_name, conn, if_exists="replace", index=False)
     conn.close()
+    
+    st.subheader("🗄 SQLite Storage Status")
+    
+    conn_sqlite = sqlite3.connect("zeusai_results.db")
+    
+    tables = pd.read_sql(
+        "SELECT name FROM sqlite_master WHERE type='table';",
+        conn_sqlite
+    )
+    
+    st.write("Tables in SQLite:")
+    st.dataframe(tables)
+    
+    if not tables.empty:
+        df_preview = pd.read_sql(
+            "SELECT * FROM pii_scan_results LIMIT 10",
+            conn_sqlite
+        )
+        st.write("Sample Stored Rows:")
+        st.dataframe(df_preview)
+    
+    conn_sqlite.close()
 
 
 def safe_json_loads(text: str):
@@ -872,6 +894,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
