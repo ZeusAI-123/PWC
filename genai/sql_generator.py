@@ -128,6 +128,7 @@ Views:
 
     return response.output_text
 
+<<<<<<< Updated upstream
 def get_mongo_ingestion_decision(
     openai_client,
     collection_name,
@@ -194,4 +195,6 @@ JSON FORMAT (FOLLOW EXACTLY):
     )
 
     return response.choices[0].message.content
+=======
+>>>>>>> Stashed changes
 
