@@ -33,8 +33,8 @@ dialect = None
 load_dotenv()
 
 
-# api_key = st.secrets["OPENAI_API_KEY"]
-api_key = os.environ.get("OPENAI_API_KEY")
+api_key = st.secrets["OPENAI_API_KEY"]
+# api_key = os.environ.get("OPENAI_API_KEY")
 
 openai_client = OpenAI(
     api_key=api_key,
@@ -1953,6 +1953,7 @@ if (
 #         st.subheader("🤖 GenAI Decision")
 #         st.code(decision, language="json")
 #         st.session_state["genai_decision"] = decision
+
 
 
 
