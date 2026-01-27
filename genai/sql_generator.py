@@ -1,7 +1,11 @@
 from openai import OpenAI
 import streamlit as st
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-api_key = st.secrets["OPENAI_API_KEY"]
+# api_key = st.secrets["OPENAI_API_KEY"]
+api_key = os.environ.get("OPENAI_API_KEY")
 
 openai_client = OpenAI(
     api_key=api_key,
@@ -128,8 +132,6 @@ Views:
 
     return response.output_text
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 def get_mongo_ingestion_decision(
     openai_client,
     collection_name,
@@ -196,8 +198,4 @@ JSON FORMAT (FOLLOW EXACTLY):
     )
 
     return response.choices[0].message.content
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 

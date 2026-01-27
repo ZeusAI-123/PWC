@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import os
 from spark.schema_compare import get_tables, get_table_schema
 from genai.sql_generator import get_ingestion_decision, classify_impacted_views_llm
+from genai.llm_summary import generate_sql_documentation
 from spark.schema_compare import get_file_schema
 from spark.lineage import get_impacted_views_snowflake, get_view_definitions
 from spark.ingest import insert_data
@@ -19,13 +20,21 @@ st.session_state.setdefault("ingestion_mode", None)
 st.session_state.setdefault("selected_table", None)
 st.session_state.setdefault("decision", None)
 st.session_state.setdefault("confirm", False)
+st.session_state.setdefault("catalog_objects", None)
+st.session_state.setdefault("catalog_overview", None)
+st.session_state.setdefault("catalog_selected", None)
+st.session_state.setdefault("catalog_selected_type", None)
+st.session_state.setdefault("tables", None)
+
+
 schema_name = None
 table_name = None
 dialect = None
 load_dotenv()
 
 
-api_key = st.secrets["OPENAI_API_KEY"]
+# api_key = st.secrets["OPENAI_API_KEY"]
+api_key = os.environ.get("OPENAI_API_KEY")
 
 openai_client = OpenAI(
     api_key=api_key,
@@ -39,47 +48,78 @@ st.set_page_config(
 )
 
 st.title("🧠 ZeusAI-Driven DATA Ingestion")
-# =========================
-# 🔄 REFRESH WORKFLOW (KEEP CONNECTION)
-# =========================
-with st.container():
-    col1, col2 = st.columns([1, 9])
+import re
 
-    with col1:
-        if st.button("🔄 Refresh"):
+def find_downstream_views(conn, database, schema, object_name):
 
-            # 🔥 Reset workflow state
-            keys_to_reset = [
-                "ingestion_mode",
-                "selected_table",
-                "decision",
-                "confirm",
-                "df_file",
-                "pii_scan_results",
-                "impacted_views"
-            ]
-        
-            for key in keys_to_reset:
-                st.session_state.pop(key, None)
-        
-            # 🔁 RELOAD TABLES FROM DB (THIS IS THE KEY)
-            conn = st.session_state.get("conn")
-            dialect = st.session_state.get("db_dialect")
-        
-            if conn and dialect:
-                tables_df = get_tables(conn, dialect)
-        
-                if dialect == "sqlserver":
-                    tables_df["full_name"] = (
-                        tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-                    )
-                else:
-                    tables_df["full_name"] = tables_df["TABLE_NAME"]
-        
-                st.session_state["tables"] = tables_df
-        
-            st.success("Workflow reset. Metadata refreshed.")
-            st.rerun()
+    sql = f"""
+    SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION
+    FROM {database}.INFORMATION_SCHEMA.VIEWS
+    """
+
+    df = pd.read_sql(sql, conn)
+
+    pattern = f"{schema}.{object_name}".upper()
+
+    mask = df["VIEW_DEFINITION"].astype(str).str.upper().str.contains(
+    pattern,
+    na=False
+)
+
+
+    return df.loc[mask, ["TABLE_SCHEMA", "TABLE_NAME"]]
+def find_downstream_procs(conn, database, schema, object_name):
+
+    sql = f"""
+    SELECT
+        ROUTINE_SCHEMA,
+        ROUTINE_NAME,
+        ROUTINE_DEFINITION
+    FROM INFORMATION_SCHEMA.ROUTINES
+    WHERE ROUTINE_TYPE = 'PROCEDURE'
+    """
+
+    df = pd.read_sql(sql, conn)
+
+    pattern = f"{schema}.{object_name}".upper()
+
+    mask = df["ROUTINE_DEFINITION"].astype(str).str.upper().str.contains(
+    pattern,
+    na=False
+)
+
+
+    return df.loc[mask, ["ROUTINE_SCHEMA", "ROUTINE_NAME"]]
+
+def extract_sql_lineage(sql_text):
+
+    sql = sql_text.upper()
+
+    tables = set()
+    views = set()
+    procedures = set()
+    functions = set()
+
+    # FROM / JOIN objects
+    for m in re.findall(r"(?:FROM|JOIN)\s+([A-Z0-9_\.]+)", sql):
+        tables.add(m)
+
+    # CALL proc()
+    for m in re.findall(r"CALL\s+([A-Z0-9_\.]+)", sql):
+        procedures.add(m)
+
+    # functions func(...)
+    for m in re.findall(r"([A-Z_][A-Z0-9_]*)\s*\(", sql):
+        if m not in ["SELECT", "FROM", "JOIN", "WHERE", "AND", "OR"]:
+            functions.add(m)
+
+    return {
+        "tables": sorted(tables),
+        "views": sorted(views),
+        "procedures": sorted(procedures),
+        "functions": sorted(functions),
+    }
+
 
 def save_to_sqlite(df, db_path="zeusai_results.db", table_name="pii_scan_results"):
     """
@@ -90,29 +130,6 @@ def save_to_sqlite(df, db_path="zeusai_results.db", table_name="pii_scan_results
     conn = sqlite3.connect(db_path)
     df.to_sql(table_name, conn, if_exists="replace", index=False)
     conn.close()
-    
-    # st.subheader("🗄 SQLite Storage Status")
-    
-    # conn_sqlite = sqlite3.connect("zeusai_results.db")
-    
-    # tables = pd.read_sql(
-    #     "SELECT name FROM sqlite_master WHERE type='table';",
-    #     conn_sqlite
-    # )
-    
-    # st.write("Tables in SQLite:")
-    # st.dataframe(tables)
-    
-    # if not tables.empty:
-    #     df_preview = pd.read_sql(
-    #         "SELECT * FROM pii_scan_results LIMIT 10",
-    #         conn_sqlite
-    #     )
-    #     st.write("Sample Stored Rows:")
-    #     st.dataframe(df_preview)
-    
-    # conn_sqlite.close()
-
 
 def safe_json_loads(text: str):
     """
@@ -192,6 +209,127 @@ def fetch_top_n_rows(conn, table_name, dialect, n=10):
     columns = [col[0] for col in cursor.description]
 
     return pd.DataFrame(rows, columns=columns)
+
+def get_object_row_counts(conn, catalog_df, dialect):
+
+    cursor = conn.cursor()
+    results = []
+
+    for _, row in catalog_df.iterrows():
+
+        obj = row["full_name"]
+        obj_type = row["object_type"]
+
+        cnt = None
+
+        if obj_type == "TABLE":
+            sql = f"SELECT COUNT(*) FROM {obj}"
+
+            try:
+                cursor.execute(sql)
+                cnt = cursor.fetchone()[0]
+            except:
+                pass
+
+        results.append(
+            {
+                "full_name": obj,
+                "object_type": obj_type,
+                "rows": cnt,
+            }
+        )
+
+    return pd.DataFrame(results)
+
+
+def save_catalog_to_sqlite(
+    df,
+    source_object,
+    object_type,
+    db_path="zeusai_results.db"
+):
+
+    conn = sqlite3.connect(db_path)
+
+    df["source_object"] = source_object
+    df["object_type"] = object_type
+
+    df.to_sql(
+        "data_catalog",
+        conn,
+        if_exists="append",
+        index=False
+    )
+
+    conn.close()
+
+
+def get_views(conn, dialect, schema=None, database=None):
+
+    cursor = conn.cursor()
+
+    if dialect == "sqlserver":
+
+        sql = """
+        SELECT TABLE_SCHEMA, TABLE_NAME
+        FROM INFORMATION_SCHEMA.VIEWS
+        """
+
+        cursor.execute(sql)
+
+        rows = cursor.fetchall()
+
+        df = pd.DataFrame(rows, columns=["schema", "name"])
+
+        return df
+
+    else:  # snowflake
+
+        sql = f"SHOW VIEWS IN SCHEMA {database}.{schema}"
+
+        cursor.execute(sql)
+
+        rows = cursor.fetchall()
+
+        cols = [c[0] for c in cursor.description]
+
+        df = pd.DataFrame(rows, columns=cols)
+
+        return df[["schema_name", "name"]].rename(
+            columns={
+                "schema_name": "schema",
+                "name": "name",
+            }
+        )
+
+
+    # rows = cursor.fetchall()
+
+    # return pd.DataFrame(rows, columns=["schema", "name"])
+
+
+
+def get_procedures(conn, dialect):
+
+    cursor = conn.cursor()
+
+    if dialect == "sqlserver":
+        sql = """
+        SELECT SPECIFIC_SCHEMA, SPECIFIC_NAME
+        FROM INFORMATION_SCHEMA.ROUTINES
+        WHERE ROUTINE_TYPE = 'PROCEDURE'
+        """
+    else:
+        sql = """
+        SELECT PROCEDURE_SCHEMA, PROCEDURE_NAME
+        FROM INFORMATION_SCHEMA.PROCEDURES
+        """
+
+    cursor.execute(sql)
+
+    rows = cursor.fetchall()
+
+    return pd.DataFrame(rows, columns=["schema", "name"])
 
 
 def detect_pii_llm(openai_client, table_name, sample_payload):
@@ -305,32 +443,530 @@ if st.button("Connect"):
         st.session_state["db_dialect"] = dialect
 
         tables_df = get_tables(conn, dialect)
-
-        if dialect == "sqlserver":
-            tables_df["full_name"] = (
-                tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-            )
-        else:
-            tables_df["full_name"] = tables_df["TABLE_NAME"]
-
         st.session_state["tables"] = tables_df
+
+        views_df = get_views(conn, dialect, schema, database)
+        procs_df = get_procedures(conn, dialect)
+
+        tables_df["object_type"] = "TABLE"
+        views_df["object_type"] = "VIEW"
+        procs_df["object_type"] = "PROC"
+
+        tables_df["full_name"] = (
+            tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+        )
+
+        views_df["full_name"] = (
+            views_df["schema"] + "." + views_df["name"]
+        )
+
+        procs_df["full_name"] = (
+            procs_df["schema"] + "." + procs_df["name"]
+        )
+
+        catalog_df = pd.concat(
+            [
+                tables_df[["full_name", "object_type"]],
+                views_df[["full_name", "object_type"]],
+                procs_df[["full_name", "object_type"]],
+            ],
+            ignore_index=True,
+        )
+        # st.write("🧪 TABLES:", len(tables_df))
+        # st.write("🧪 VIEWS:", len(views_df))
+        # st.write("🧪 PROCS:", len(procs_df))
+        # st.dataframe(catalog_df)
+
+
+        st.session_state.pop("catalog_overview", None)
+        st.session_state["catalog_objects"] = catalog_df
         st.success(f"✅ Connected to {db_type}")
 
     except Exception as e:
         st.error(f"❌ Connection failed: {e}")
         st.stop()
+
+with st.container():
+    col1, col2 = st.columns([1, 9])
+
+    with col1:
+        if st.button("🔄 Refresh"):
+
+            # 🔥 Reset workflow state
+            keys_to_reset = [
+                "ingestion_mode",
+                "selected_table",
+                "decision",
+                "confirm",
+                "df_file",
+                "pii_scan_results",
+                "impacted_views"
+            ]
+        
+            for key in keys_to_reset:
+                st.session_state.pop(key, None)
+        
+            # 🔁 RELOAD TABLES FROM DB (THIS IS THE KEY)
+            conn = st.session_state.get("conn")
+            dialect = st.session_state.get("db_dialect")
+        
+            if conn and dialect:
+                tables_df = get_tables(conn, dialect)
+                st.session_state["tables"] = tables_df
+
+        
+                if dialect == "sqlserver":
+                    tables_df["full_name"] = (
+                        tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+                    )
+                else:
+                    tables_df["full_name"] = tables_df["TABLE_NAME"]
+        
+                st.session_state["tables"] = tables_df
+        
+            st.success("Workflow reset. Metadata refreshed.")
+            st.session_state.pop("catalog_overview", None)
+            st.session_state.pop("catalog_objects", None)
+
+            st.rerun()
+
+# if st.session_state.get("catalog_objects") is None:
+#     st.info("ℹ️ Connect to a database to load schema catalog.")
+#     st.stop()
+
 # =========================
 # 3. INGESTION MODE
 # =========================
+# # ============================
+# # 📚 SCHEMA CATALOG — CLEAN GRID
+# # ============================
+
+# st.subheader("📚 Schema Catalog")
+# st.caption("Click a table to view its metadata 👇")
+
+# conn = st.session_state["conn"]
+# dialect = st.session_state["db_dialect"]
+# tables_df = st.session_state["tables"]
+
+# # Cache overview once
+# catalog_df = st.session_state.get("catalog_objects")
+
+
+# if "catalog_overview" not in st.session_state:
+#     overview_df = get_object_row_counts(
+#         conn,
+#         catalog_df,
+#         dialect
+#     )
+
+#     st.session_state["catalog_overview"] = overview_df
+
+# overview_df = st.session_state.get("catalog_overview")
+
+# if overview_df is None or overview_df.empty:
+#     st.info("ℹ️ No catalog objects loaded yet. Click Connect.")
+#     st.stop()
+
+# tables_only = overview_df[overview_df["object_type"] == "TABLE"]
+# views_only = overview_df[overview_df["object_type"] == "VIEW"]
+# procs_only = overview_df[overview_df["object_type"] == "PROC"]
+
+
+# # # ---- GRID LAYOUT ----
+# # cols_per_row = 3
+
+# # rows = [
+# #     overview_df.iloc[i:i + cols_per_row]
+# #     for i in range(0, len(overview_df), cols_per_row)
+# # ]
+
+# # for r_idx, chunk in enumerate(rows):
+
+# #     cols = st.columns(cols_per_row)
+
+# #     for c_idx, (_, row) in enumerate(chunk.iterrows()):
+
+# #         with cols[c_idx]:
+
+# #             clicked = st.button(
+# #                 f"📦 {row['full_name']}\n\n"
+# #                 f"Rows: {row['rows']}",
+# #                 key=f"obj_{row['full_name']}",
+# #                 use_container_width=True,
+# #             )
+
+
+# #             if clicked:
+# #                 st.session_state["catalog_selected"] = row["full_name"]
+# #                 st.session_state["catalog_selected_type"] = row["object_type"]
+
+# #                 st.rerun()
+# if not tables_only.empty:
+
+#     st.markdown("## 📦 Tables")
+
+#     cols_per_row = 3
+
+#     rows = [
+#         tables_only.iloc[i:i + cols_per_row]
+#         for i in range(0, len(tables_only), cols_per_row)
+#     ]
+
+#     for chunk in rows:
+
+#         cols = st.columns(cols_per_row)
+
+#         for i, row in chunk.iterrows():
+
+#             with cols[list(chunk.index).index(i)]:
+
+#                 clicked = st.button(
+#                     f"📦 {row['full_name']}\n\n"
+#                     f"Rows: {row['rows']}",
+#                     key=f"tbl_{row['full_name']}",
+#                     use_container_width=True,
+#                 )
+
+#                 if clicked:
+#                     st.session_state["catalog_selected"] = row["full_name"]
+#                     st.session_state["catalog_selected_type"] = "TABLE"
+#                     st.rerun()
+
+# # ----------------------------
+# # 👁️ VIEWS
+# # ----------------------------
+
+# if not views_only.empty:
+
+#     st.markdown("## 👁️ Views")
+
+#     rows = [
+#         views_only.iloc[i:i + cols_per_row]
+#         for i in range(0, len(views_only), cols_per_row)
+#     ]
+
+#     for chunk in rows:
+
+#         cols = st.columns(cols_per_row)
+
+#         for i, row in chunk.iterrows():
+
+#             with cols[list(chunk.index).index(i)]:
+
+#                 clicked = st.button(
+#                     f"👁️ {row['full_name']}",
+#                     key=f"view_{row['full_name']}",
+#                     use_container_width=True,
+#                 )
+
+#                 if clicked:
+#                     st.session_state["catalog_selected"] = row["full_name"]
+#                     st.session_state["catalog_selected_type"] = "VIEW"
+#                     st.rerun()
+
+# # ----------------------------
+# # ⚙️ PROCS
+# # ----------------------------
+
+# if not procs_only.empty:
+
+#     st.markdown("## ⚙️ Procedures")
+
+#     rows = [
+#         procs_only.iloc[i:i + cols_per_row]
+#         for i in range(0, len(procs_only), cols_per_row)
+#     ]
+
+#     for chunk in rows:
+
+#         cols = st.columns(cols_per_row)
+
+#         for i, row in chunk.iterrows():
+
+#             with cols[list(chunk.index).index(i)]:
+
+#                 clicked = st.button(
+#                     f"⚙️ {row['full_name']}",
+#                     key=f"proc_{row['full_name']}",
+#                     use_container_width=True,
+#                 )
+
+#                 if clicked:
+#                     st.session_state["catalog_selected"] = row["full_name"]
+#                     st.session_state["catalog_selected_type"] = "PROC"
+#                     st.rerun()
+
+# if st.session_state.get("catalog_selected"):
+
+#     st.divider()
+
+#     selected = st.session_state["catalog_selected"]
+
+#     st.subheader(f"🗄 {selected}")
+
+#     dialect = st.session_state["db_dialect"]
+#     conn = st.session_state["conn"]
+
+#     parts = selected.split(".")
+
+#     if len(parts) == 3:
+#         db_name, schema_name, table_name = parts
+#     elif len(parts) == 2:
+#         schema_name, table_name = parts
+#         db_name = database
+#     else:
+#         table_name = parts[0]
+#         schema_name = schema
+#         db_name = database
+
+#     obj_type = st.session_state["catalog_selected_type"]
+#     # --------------------------------
+#     # 📘 FETCH VIEW DEFINITION
+#     # --------------------------------
+
+#     view_sql = None
+
+#     if obj_type == "VIEW":
+
+#         if dialect == "sqlserver":
+
+#             sql = f"""
+#             SELECT definition
+#             FROM sys.sql_modules m
+#             JOIN sys.views v ON m.object_id = v.object_id
+#             WHERE SCHEMA_NAME(v.schema_id) = '{schema_name}'
+#             AND v.name = '{table_name}'
+#             """
+
+#         else:  # snowflake
+
+#             sql = f"""
+#             SELECT GET_DDL('VIEW',
+#                 '{db_name}.{schema_name}.{table_name}')
+#             """
+
+#         df_def = pd.read_sql(sql, conn)
+
+#         view_sql = df_def.iloc[0, 0]
+#     llm_doc = None
+
+#     if obj_type == "VIEW" and view_sql:
+
+#         with st.spinner("🧠 Generating technical summary with GenAI..."):
+
+#             llm_doc = generate_sql_documentation(
+#                 object_name=selected,
+#                 object_type="view",
+#                 object_sql=view_sql
+#             )
+
+#     # =====================================
+# # 📘 VIEW DOCUMENTATION + LINEAGE UI
+# # =====================================
+
+#         st.markdown("## 🧠 Description")
+#         st.markdown(llm_doc or "No description generated.")
+
+#         st.markdown("## 🌐 Lineage")
+
+#         lineage = extract_sql_lineage(view_sql)
+
+#         st.markdown("### Tables Used")
+#         st.write(lineage.get("tables", []))
+
+#         st.markdown("### Views Used")
+#         st.write(lineage.get("views", []))
+
+#         st.markdown("### Procedures Used")
+#         st.write(lineage.get("procedures", []))
+
+#         st.markdown("### Functions Used")
+#         st.write(lineage.get("functions", []))
+
+#         st.markdown("## 🔁 Relations")
+
+#         st.markdown("### Called by Views")
+#         downstream_views = find_downstream_views(conn, db_name, schema_name, table_name)
+#         if downstream_views is not None and not downstream_views.empty:
+#             st.dataframe(downstream_views)
+#         else:
+#             st.write("None")
+
+
+#         st.markdown("### Called by Procedures")
+
+#         if dialect == "sqlserver":
+
+#             downstream_procs = find_downstream_procs(
+#                 conn,
+#                 db_name,
+#                 schema_name,
+#                 table_name
+#             )
+
+#             if downstream_procs is not None and not downstream_procs.empty:
+#                 st.dataframe(downstream_procs)
+#             else:
+#                 st.write("None")
+
+#         else:
+#             st.write("Not applicable for Snowflake.")
+
+
+
+#         st.divider()
+
+
+
+#     if obj_type in ["TABLE", "VIEW"]:
+
+#         meta_df = get_table_schema(
+#             conn,
+#             schema_name,
+#             table_name,
+#             dialect
+#         )
+
+#     else:  # PROC
+
+#         if dialect == "sqlserver":
+
+#             meta_sql = f"""
+#             SELECT
+#                 PARAMETER_NAME as column_name,
+#                 DATA_TYPE as data_type,
+#                 CHARACTER_MAXIMUM_LENGTH as length
+#             FROM INFORMATION_SCHEMA.PARAMETERS
+#             WHERE SPECIFIC_SCHEMA = '{schema_name}'
+#             AND SPECIFIC_NAME = '{table_name}'
+#             """
+
+#         else:  # snowflake
+
+
+#     # Snowflake-safe: DESCRIBE PROCEDURE
+#             current_db = database  # already captured from UI
+
+#             meta_sql = f"DESCRIBE PROCEDURE {current_db}.{schema_name}.{table_name}()"
+
+
+#             meta_df = pd.read_sql(meta_sql, conn)
+
+#             # Normalize DESCRIBE output
+#             meta_df = meta_df.rename(
+#                 columns={
+#                     "name": "column_name",
+#                     "type": "data_type"
+#                 }
+#             )
+
+#             meta_df = meta_df[["column_name", "data_type"]]
+#             meta_df["length"] = None
+
+
+
+#         meta_df = pd.read_sql(meta_sql, conn)
+
+#         if "length" not in meta_df:
+#             meta_df["length"] = None
+
+
+
+#     # ----------------------------
+#     # 🔥 Normalize / enrich columns
+#     # ----------------------------
+
+#     meta_df.columns = [c.lower() for c in meta_df.columns]
+
+#     rename_map = {
+#         "column_name": "column_name",
+#         "data_type": "data_type",
+#         "character_maximum_length": "length",
+#         "is_nullable": "nullable"
+#     }
+
+#     meta_df = meta_df.rename(columns=rename_map)
+
+#     # Length cleanup
+#     if "length" not in meta_df:
+#         meta_df["length"] = None
+
+#     # Constraint flag
+#     meta_df["constraint"] = meta_df.apply(
+#         lambda r: "YES"
+#         if any(
+#             x in str(r).upper()
+#             for x in ["PRIMARY", "FOREIGN", "UNIQUE"]
+#         )
+#         else "NO",
+#         axis=1
+#     )
+
+#     # Editable columns
+#     meta_df["pii"] = False
+#     meta_df["tag"] = ""
+
+#     # Limit tag length to 20
+#     meta_df["tag"] = meta_df["tag"].astype(str).str[:20]
+
+#     display_cols = [
+#         "column_name",
+#         "data_type",
+#         "length",
+#         "constraint",
+#         "pii",
+#         "tag"
+#     ]
+
+#     editable_df = st.data_editor(
+#         meta_df[display_cols],
+#         num_rows="fixed",
+#         use_container_width=True,
+#         column_config={
+#             "pii": st.column_config.CheckboxColumn(
+#                 "PII"
+#             ),
+#             "tag": st.column_config.TextColumn(
+#                 "Tag",
+#                 max_chars=20
+#             ),
+#         }
+#     )
+
+#     # ----------------------------
+#     # 💾 SAVE TO SQLITE
+#     # ----------------------------
+
+#     if st.button("💾 Save Catalog Metadata"):
+
+#         save_catalog_to_sqlite(
+#             editable_df,
+#             source_object=selected,
+#             object_type=st.session_state["catalog_selected_type"]
+#         )
+
+
+#         st.success("✅ Metadata saved to SQLite catalog")
+
+
 if "conn" in st.session_state:
     st.subheader("🧭 Select Operation")
 
+    # ingestion_mode = st.radio(
+    #     "Choose ingestion type",
+    #     [
+    #         "Ingest into Existing Table",
+    #         "Create New Table & Ingest",
+    #         "Detect PII from Existing Table"
+    #     ],
+    #     index=None
+    # )
     ingestion_mode = st.radio(
         "Choose ingestion type",
         [
-            "Ingest into Existing Table",
-            "Create New Table & Ingest",
-            "Detect PII from Existing Table"
+            "DB Change",
+            "Change Detection",
+
         ],
         index=None
     )
@@ -342,6 +978,429 @@ if "conn" in st.session_state:
 # =========================
 # PII DETECTION — ALL TABLES
 # =========================
+if st.session_state.get("ingestion_mode") == "DB Change":
+    # 🔄 rebuild catalog when entering DB Change
+    if "catalog_objects" not in st.session_state or st.session_state["catalog_objects"] is None:
+        st.warning("⚠️ Schema catalog not loaded. Please reconnect.")
+        st.stop()
+
+    st.session_state.pop("catalog_overview", None)
+
+    # ============================
+    # 📚 SCHEMA CATALOG — CLEAN GRID
+    # ============================
+
+    st.subheader("📚 Schema Catalog")
+    st.caption("Click a table to view its metadata 👇")
+
+    conn = st.session_state["conn"]
+    dialect = st.session_state["db_dialect"]
+    tables_df = st.session_state["tables"]
+
+    # Cache overview once
+    catalog_df = st.session_state.get("catalog_objects")
+
+
+    if "catalog_overview" not in st.session_state:
+        overview_df = get_object_row_counts(
+            conn,
+            catalog_df,
+            dialect
+        )
+
+        st.session_state["catalog_overview"] = overview_df
+
+    overview_df = st.session_state.get("catalog_overview")
+
+    if overview_df is None or overview_df.empty:
+        st.info("ℹ️ No catalog objects loaded yet. Click Connect.")
+        st.stop()
+
+    tables_only = overview_df[overview_df["object_type"] == "TABLE"]
+    views_only = overview_df[overview_df["object_type"] == "VIEW"]
+    procs_only = overview_df[overview_df["object_type"] == "PROC"]
+
+
+    # # ---- GRID LAYOUT ----
+    # cols_per_row = 3
+
+    # rows = [
+    #     overview_df.iloc[i:i + cols_per_row]
+    #     for i in range(0, len(overview_df), cols_per_row)
+    # ]
+
+    # for r_idx, chunk in enumerate(rows):
+
+    #     cols = st.columns(cols_per_row)
+
+    #     for c_idx, (_, row) in enumerate(chunk.iterrows()):
+
+    #         with cols[c_idx]:
+
+    #             clicked = st.button(
+    #                 f"📦 {row['full_name']}\n\n"
+    #                 f"Rows: {row['rows']}",
+    #                 key=f"obj_{row['full_name']}",
+    #                 use_container_width=True,
+    #             )
+
+
+    #             if clicked:
+    #                 st.session_state["catalog_selected"] = row["full_name"]
+    #                 st.session_state["catalog_selected_type"] = row["object_type"]
+
+    #                 st.rerun()
+    # st.write("DEBUG catalog_objects:", st.session_state.get("catalog_objects"))
+    # st.write("DEBUG overview_df:", overview_df)
+
+    if not tables_only.empty:
+
+        st.markdown("## 📦 Tables")
+
+        cols_per_row = 3
+
+        rows = [
+            tables_only.iloc[i:i + cols_per_row]
+            for i in range(0, len(tables_only), cols_per_row)
+        ]
+
+        for chunk in rows:
+
+            cols = st.columns(cols_per_row)
+
+            for i, row in chunk.iterrows():
+
+                with cols[list(chunk.index).index(i)]:
+
+                    clicked = st.button(
+                        f"📦 {row['full_name']}\n\n"
+                        f"Rows: {row['rows']}",
+                        key=f"tbl_{row['full_name']}",
+                        use_container_width=True,
+                    )
+
+                    if clicked:
+                        st.session_state["catalog_selected"] = row["full_name"]
+                        st.session_state["catalog_selected_type"] = "TABLE"
+                        st.rerun()
+
+    # ----------------------------
+    # 👁️ VIEWS
+    # ----------------------------
+
+    if not views_only.empty:
+
+        st.markdown("## 👁️ Views")
+
+        rows = [
+            views_only.iloc[i:i + cols_per_row]
+            for i in range(0, len(views_only), cols_per_row)
+        ]
+
+        for chunk in rows:
+
+            cols = st.columns(cols_per_row)
+
+            for i, row in chunk.iterrows():
+
+                with cols[list(chunk.index).index(i)]:
+
+                    clicked = st.button(
+                        f"👁️ {row['full_name']}",
+                        key=f"view_{row['full_name']}",
+                        use_container_width=True,
+                    )
+
+                    if clicked:
+                        st.session_state["catalog_selected"] = row["full_name"]
+                        st.session_state["catalog_selected_type"] = "VIEW"
+                        st.rerun()
+
+    # ----------------------------
+    # ⚙️ PROCS
+    # ----------------------------
+
+    if not procs_only.empty:
+
+        st.markdown("## ⚙️ Procedures")
+
+        rows = [
+            procs_only.iloc[i:i + cols_per_row]
+            for i in range(0, len(procs_only), cols_per_row)
+        ]
+
+        for chunk in rows:
+
+            cols = st.columns(cols_per_row)
+
+            for i, row in chunk.iterrows():
+
+                with cols[list(chunk.index).index(i)]:
+
+                    clicked = st.button(
+                        f"⚙️ {row['full_name']}",
+                        key=f"proc_{row['full_name']}",
+                        use_container_width=True,
+                    )
+
+                    if clicked:
+                        st.session_state["catalog_selected"] = row["full_name"]
+                        st.session_state["catalog_selected_type"] = "PROC"
+                        st.rerun()
+
+    if st.session_state.get("catalog_selected"):
+
+        st.divider()
+
+        selected = st.session_state["catalog_selected"]
+
+        st.subheader(f"🗄 {selected}")
+
+        dialect = st.session_state["db_dialect"]
+        conn = st.session_state["conn"]
+
+        parts = selected.split(".")
+
+        if len(parts) == 3:
+            db_name, schema_name, table_name = parts
+        elif len(parts) == 2:
+            schema_name, table_name = parts
+            db_name = database
+        else:
+            table_name = parts[0]
+            schema_name = schema
+            db_name = database
+
+        obj_type = st.session_state["catalog_selected_type"]
+        # --------------------------------
+        # 📘 FETCH VIEW DEFINITION
+        # --------------------------------
+
+        view_sql = None
+
+        if obj_type == "VIEW":
+
+            if dialect == "sqlserver":
+
+                sql = f"""
+                SELECT definition
+                FROM sys.sql_modules m
+                JOIN sys.views v ON m.object_id = v.object_id
+                WHERE SCHEMA_NAME(v.schema_id) = '{schema_name}'
+                AND v.name = '{table_name}'
+                """
+
+            else:  # snowflake
+
+                sql = f"""
+                SELECT GET_DDL('VIEW',
+                    '{db_name}.{schema_name}.{table_name}')
+                """
+
+            df_def = pd.read_sql(sql, conn)
+
+            view_sql = df_def.iloc[0, 0]
+        llm_doc = None
+
+        if obj_type == "VIEW" and view_sql:
+
+            with st.spinner("🧠 Generating technical summary with GenAI..."):
+
+                llm_doc = generate_sql_documentation(
+                    object_name=selected,
+                    object_type="view",
+                    object_sql=view_sql
+                )
+
+        # =====================================
+    # 📘 VIEW DOCUMENTATION + LINEAGE UI
+    # =====================================
+
+            st.markdown("## 🧠 Description")
+            st.markdown(llm_doc or "No description generated.")
+
+            st.markdown("## 🌐 Lineage")
+
+            lineage = extract_sql_lineage(view_sql)
+
+            st.markdown("### Tables Used")
+            st.write(lineage.get("tables", []))
+
+            st.markdown("### Views Used")
+            st.write(lineage.get("views", []))
+
+            st.markdown("### Procedures Used")
+            st.write(lineage.get("procedures", []))
+
+            st.markdown("### Functions Used")
+            st.write(lineage.get("functions", []))
+
+            st.markdown("## 🔁 Relations")
+
+            st.markdown("### Called by Views")
+            downstream_views = find_downstream_views(conn, db_name, schema_name, table_name)
+            if downstream_views is not None and not downstream_views.empty:
+                st.dataframe(downstream_views)
+            else:
+                st.write("None")
+
+
+            st.markdown("### Called by Procedures")
+
+            if dialect == "sqlserver":
+
+                downstream_procs = find_downstream_procs(
+                    conn,
+                    db_name,
+                    schema_name,
+                    table_name
+                )
+
+                if downstream_procs is not None and not downstream_procs.empty:
+                    st.dataframe(downstream_procs)
+                else:
+                    st.write("None")
+
+            else:
+                st.write("Not applicable for Snowflake.")
+
+
+
+            st.divider()
+
+
+
+        if obj_type in ["TABLE", "VIEW"]:
+
+            meta_df = get_table_schema(
+                conn,
+                schema_name,
+                table_name,
+                dialect
+            )
+
+        else:  # PROC
+
+            if dialect == "sqlserver":
+
+                meta_sql = f"""
+                SELECT
+                    PARAMETER_NAME as column_name,
+                    DATA_TYPE as data_type,
+                    CHARACTER_MAXIMUM_LENGTH as length
+                FROM INFORMATION_SCHEMA.PARAMETERS
+                WHERE SPECIFIC_SCHEMA = '{schema_name}'
+                AND SPECIFIC_NAME = '{table_name}'
+                """
+
+            else:  # snowflake
+
+
+        # Snowflake-safe: DESCRIBE PROCEDURE
+                current_db = database  # already captured from UI
+
+                meta_sql = f"DESCRIBE PROCEDURE {current_db}.{schema_name}.{table_name}()"
+
+
+                meta_df = pd.read_sql(meta_sql, conn)
+
+                # Normalize DESCRIBE output
+                meta_df = meta_df.rename(
+                    columns={
+                        "name": "column_name",
+                        "type": "data_type"
+                    }
+                )
+
+                meta_df = meta_df[["column_name", "data_type"]]
+                meta_df["length"] = None
+
+
+
+            meta_df = pd.read_sql(meta_sql, conn)
+
+            if "length" not in meta_df:
+                meta_df["length"] = None
+
+
+
+        # ----------------------------
+        # 🔥 Normalize / enrich columns
+        # ----------------------------
+
+        meta_df.columns = [c.lower() for c in meta_df.columns]
+
+        rename_map = {
+            "column_name": "column_name",
+            "data_type": "data_type",
+            "character_maximum_length": "length",
+            "is_nullable": "nullable"
+        }
+
+        meta_df = meta_df.rename(columns=rename_map)
+
+        # Length cleanup
+        if "length" not in meta_df:
+            meta_df["length"] = None
+
+        # Constraint flag
+        meta_df["constraint"] = meta_df.apply(
+            lambda r: "YES"
+            if any(
+                x in str(r).upper()
+                for x in ["PRIMARY", "FOREIGN", "UNIQUE"]
+            )
+            else "NO",
+            axis=1
+        )
+
+        # Editable columns
+        meta_df["pii"] = False
+        meta_df["tag"] = ""
+
+        # Limit tag length to 20
+        meta_df["tag"] = meta_df["tag"].astype(str).str[:20]
+
+        display_cols = [
+            "column_name",
+            "data_type",
+            "length",
+            "constraint",
+            "pii",
+            "tag"
+        ]
+
+        editable_df = st.data_editor(
+            meta_df[display_cols],
+            num_rows="fixed",
+            use_container_width=True,
+            column_config={
+                "pii": st.column_config.CheckboxColumn(
+                    "PII"
+                ),
+                "tag": st.column_config.TextColumn(
+                    "Tag",
+                    max_chars=20
+                ),
+            }
+        )
+
+        # ----------------------------
+        # 💾 SAVE TO SQLITE
+        # ----------------------------
+
+        if st.button("💾 Save Catalog Metadata"):
+
+            save_catalog_to_sqlite(
+                editable_df,
+                source_object=selected,
+                object_type=st.session_state["catalog_selected_type"]
+            )
+
+
+            st.success("✅ Metadata saved to SQLite catalog")
+
+
 if st.session_state.get("ingestion_mode") == "Detect PII from Existing Table":
 
     st.subheader("🔐 PII Scan Across All Tables")

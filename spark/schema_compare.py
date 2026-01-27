@@ -18,7 +18,6 @@ def get_tables(conn, dialect):
         return pd.read_sql(query, conn)
 
 
-
 def get_table_schema(conn, schema, table, dialect):
     if dialect == "sqlserver":
         query = f"""
