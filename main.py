@@ -43,8 +43,8 @@ init_db_change_log()
 
 
 
-api_key = st.secrets["OPENAI_API_KEY"]
-# api_key = os.environ.get("OPENAI_API_KEY")
+# api_key = st.secrets["OPENAI_API_KEY"]
+api_key = os.environ.get("OPENAI_API_KEY")
 
 openai_client = OpenAI(
     api_key=api_key,
@@ -216,6 +216,7 @@ def fetch_top_n_rows(conn, table_name, dialect, n=10):
 
     cursor.execute(sql)
     rows = cursor.fetchall()
+    cursor.close()
     columns = [col[0] for col in cursor.description]
 
     return pd.DataFrame(rows, columns=columns)
@@ -227,15 +228,16 @@ def get_object_timestamps_sqlserver(conn):
 
     sql = """
     SELECT
-        s.name AS schema,
-        o.name AS object_name,
-        o.type_desc,
-        o.create_date,
-        o.modify_date
-    FROM sys.objects o
-    JOIN sys.schemas s
-        ON o.schema_id = s.schema_id
-    WHERE o.type IN ('U','V','P','FN','IF','TF');
+    s.name AS [schema],
+    o.name AS object_name,
+    o.type_desc,
+    o.create_date,
+    o.modify_date
+FROM sys.objects o
+JOIN sys.schemas s
+    ON o.schema_id = s.schema_id
+WHERE o.type IN ('U','V','P','FN','IF','TF');
+
     """
 
     return pd.read_sql(sql, conn)
@@ -451,21 +453,23 @@ def save_catalog_to_sqlite(
 
 def get_views(conn, dialect, schema=None, database=None):
 
-    cursor = conn.cursor()
-
     if dialect == "sqlserver":
 
         sql = """
-        SELECT TABLE_SCHEMA, TABLE_NAME
-        FROM INFORMATION_SCHEMA.VIEWS
-        """
+SELECT
+    TABLE_SCHEMA AS [schema],
+    TABLE_NAME AS [name]
+FROM INFORMATION_SCHEMA.VIEWS
+"""
 
-        cursor.execute(sql)
-        rows = cursor.fetchall()
 
-        return pd.DataFrame(rows, columns=["schema", "name"])
+        df = pd.read_sql(sql, conn)
+
+        return df[["schema", "name"]]
 
     else:  # snowflake
+
+        cursor = conn.cursor()
 
         sql = f"SHOW VIEWS IN SCHEMA {database}.{schema}"
 
@@ -476,7 +480,6 @@ def get_views(conn, dialect, schema=None, database=None):
 
         df = pd.DataFrame(rows, columns=cols)
 
-        # --- normalize column names ---
         col_map = {}
 
         if "schema_name" in df.columns:
@@ -489,7 +492,6 @@ def get_views(conn, dialect, schema=None, database=None):
 
         df = df.rename(columns=col_map)
 
-        # Safety check
         required = {"schema", "name"}
 
         if not required.issubset(df.columns):
@@ -501,6 +503,7 @@ def get_views(conn, dialect, schema=None, database=None):
 
 
 
+
     # rows = cursor.fetchall()
 
     # return pd.DataFrame(rows, columns=["schema", "name"])
@@ -509,25 +512,23 @@ def get_views(conn, dialect, schema=None, database=None):
 
 def get_procedures(conn, dialect):
 
-    cursor = conn.cursor()
-
     if dialect == "sqlserver":
+
         sql = """
-        SELECT SPECIFIC_SCHEMA, SPECIFIC_NAME
+        SELECT
+            ROUTINE_SCHEMA AS [schema],
+            ROUTINE_NAME AS [name]
         FROM INFORMATION_SCHEMA.ROUTINES
         WHERE ROUTINE_TYPE = 'PROCEDURE'
         """
+
+        df = pd.read_sql(sql, conn)
+
+        return df[["schema", "name"]]
+
     else:
-        sql = """
-        SELECT PROCEDURE_SCHEMA, PROCEDURE_NAME
-        FROM INFORMATION_SCHEMA.PROCEDURES
-        """
-
-    cursor.execute(sql)
-
-    rows = cursor.fetchall()
-
-    return pd.DataFrame(rows, columns=["schema", "name"])
+        # snowflake logic stays
+        ...
 
 
 def detect_pii_llm(openai_client, table_name, sample_payload):
@@ -677,8 +678,8 @@ if st.button("Connect"):
         if dialect == "sqlserver":
 
             ts_df = get_object_timestamps_sqlserver(conn)
-            st.write("DEBUG ts_df columns:", ts_df.columns.tolist())
-            st.write("DEBUG ts_df preview:", ts_df.head())
+            # st.write("DEBUG ts_df columns:", ts_df.columns.tolist())
+            # st.write("DEBUG ts_df preview:", ts_df.head())
 
 
             ts_df["full_name"] = ts_df["schema"] + "." + ts_df["object_name"]
