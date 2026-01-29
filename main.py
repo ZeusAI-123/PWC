@@ -98,6 +98,62 @@ def find_downstream_views(conn, database, schema, object_name):
 
 
     return df.loc[mask, ["TABLE_SCHEMA", "TABLE_NAME"]]
+
+
+def build_impact_html_report(
+    impact_payload,
+    llm_summary,
+):
+    rows = ""
+
+    for o in impact_payload["objects"]:
+        rows += (
+            f"<tr>"
+            f"<td>{o['object']}</td>"
+            f"<td>{o['type']}</td>"
+            f"<td>{o['risk']}</td>"
+            f"</tr>"
+        )
+
+    html = f"""
+    <html>
+    <head>
+      <style>
+        body {{ font-family: Arial; padding: 25px; }}
+        h1 {{ color:#1f4ed8; }}
+        table {{ border-collapse: collapse; width:100%; }}
+        th, td {{ border:1px solid #ddd; padding:8px; }}
+        th {{ background:#f3f4f6; }}
+      </style>
+    </head>
+
+    <body>
+
+    <h1>Schema Impact Report</h1>
+
+    <h2>Base Object</h2>
+    <p>{impact_payload['base_object']}</p>
+
+    <h2>Summary</h2>
+    <pre>{llm_summary}</pre>
+
+    <h2>Impacted Objects</h2>
+
+    <table>
+      <tr>
+        <th>Object</th>
+        <th>Type</th>
+        <th>Risk</th>
+      </tr>
+      {rows}
+    </table>
+
+    </body>
+    </html>
+    """
+
+    return html
+
 def find_downstream_procs(conn, database, schema, object_name):
 
     sql = f"""
@@ -244,7 +300,7 @@ def fetch_top_n_rows(conn, table_name, dialect, n=10):
 # 🔎 OBJECT TIMESTAMPS
 # ================================
 
-def get_object_timestamps_sqlserver(conn):
+def get_object_timestamps_sqlserver(conn, schema=None):
 
     sql = """
     SELECT
@@ -256,11 +312,13 @@ def get_object_timestamps_sqlserver(conn):
 FROM sys.objects o
 JOIN sys.schemas s
     ON o.schema_id = s.schema_id
-WHERE o.type IN ('U','V','P','FN','IF','TF');
+WHERE o.type IN ('U','V','P','FN','IF','TF')
+AND s.name = ?;;
 
     """
 
-    return pd.read_sql(sql, conn)
+    return pd.read_sql(sql, conn, params=[schema])
+
 
 
 def get_object_timestamps_snowflake(conn, database, schema):
@@ -481,10 +539,13 @@ SELECT
     TABLE_SCHEMA AS [schema],
     TABLE_NAME AS [name]
 FROM INFORMATION_SCHEMA.VIEWS
+WHERE TABLE_SCHEMA = ?
 """
 
 
-        df = pd.read_sql(sql, conn)
+
+        df = pd.read_sql(sql, conn, params=[schema])
+
 
         return df[["schema", "name"]]
 
@@ -531,7 +592,7 @@ FROM INFORMATION_SCHEMA.VIEWS
 
 
 
-def get_procedures(conn, dialect):
+def get_procedures(conn, dialect, schema=None):
 
     if dialect == "sqlserver":
 
@@ -541,9 +602,11 @@ def get_procedures(conn, dialect):
             ROUTINE_NAME AS [name]
         FROM INFORMATION_SCHEMA.ROUTINES
         WHERE ROUTINE_TYPE = 'PROCEDURE'
+        AND ROUTINE_SCHEMA = ?
         """
 
-        df = pd.read_sql(sql, conn)
+        df = pd.read_sql(sql, conn, params=[schema])
+
 
         return df[["schema", "name"]]
 
@@ -623,6 +686,7 @@ if db_type == "SQL Server":
             "Password",
             type="password"
         )
+        schema = st.text_input("Schema")
 
 if db_type == "Snowflake":
     st.subheader("❄️ Snowflake Connection")
@@ -664,34 +728,53 @@ if st.button("Connect"):
 
         st.session_state["conn"] = conn
         st.session_state["db_dialect"] = dialect
+        st.session_state["schema"] = schema
 
-        tables_df = get_tables(conn, dialect)
+        tables_df = get_tables(conn, dialect, schema)
         st.session_state["tables"] = tables_df
 
         views_df = get_views(conn, dialect, schema, database)
-        procs_df = get_procedures(conn, dialect)
+        procs_df = get_procedures(conn, dialect, schema)
         if dialect == "sqlserver":
-            timestamps_df = get_object_timestamps_sqlserver(conn)
+            timestamps_df = get_object_timestamps_sqlserver(conn, schema)
         else:
             timestamps_df = get_object_timestamps_snowflake(conn, database, schema)
+
         # ------------------------------
-        # NORMALIZE TIMESTAMP DF
+        # 🔁 NORMALIZE TIMESTAMPS
         # ------------------------------
 
-        timestamps_df = timestamps_df.rename(
-            columns={
-                "SCHEMA": "schema",
-                "NAME": "name",
-                "CREATE_DATE": "create_date",
-                "MODIFY_DATE": "modify_date",
-            }
-        )
+        timestamps_df.columns = [c.lower() for c in timestamps_df.columns]
+
+        if dialect == "sqlserver":
+
+            timestamps_df = timestamps_df.rename(
+                columns={
+                    "object_name": "name",
+                    "schema": "schema",
+                    "create_date": "create_date",
+                    "modify_date": "modify_date",
+                }
+            )
+
+        else:  # snowflake already aligned
+
+            timestamps_df = timestamps_df.rename(
+                columns={
+                    "object_name": "name",
+                }
+            )
+
+        # ------------------------------
+        # 🔗 Build full_name
+        # ------------------------------
 
         timestamps_df["full_name"] = (
             timestamps_df["schema"]
             + "."
             + timestamps_df["name"]
         )
+
 
         timestamps_df = timestamps_df[
             ["full_name", "create_date", "modify_date"]
@@ -1025,7 +1108,9 @@ with st.container():
             dialect = st.session_state.get("db_dialect")
         
             if conn and dialect:
-                tables_df = get_tables(conn, dialect)
+                schema = st.session_state.get("schema")
+                tables_df = get_tables(conn, dialect, schema)
+
                 st.session_state["tables"] = tables_df
 
         
@@ -1731,14 +1816,16 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
         st.stop()
 
     # 🔁 ALWAYS RE-SCAN DB
-    tables_df = get_tables(conn, dialect)
+    schema = st.session_state.get("schema")
+    tables_df = get_tables(conn, dialect, schema)
+
     tables_df["object_type"] = "TABLE"
     tables_df["full_name"] = (
         tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
     )
 
     views_df = get_views(conn, dialect, schema, database)
-    procs_df = get_procedures(conn, dialect)
+    procs_df = get_procedures(conn, dialect, schema)
     views_df["object_type"] = "VIEW"
     views_df["full_name"] = views_df["schema"] + "." + views_df["name"]
 
@@ -1747,24 +1834,38 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
 
 
     if dialect == "sqlserver":
-        timestamps_df = get_object_timestamps_sqlserver(conn)
+        timestamps_df = get_object_timestamps_sqlserver(conn, schema)
     else:
         timestamps_df = get_object_timestamps_snowflake(conn, database, schema)
+
     # ------------------------------
     # 🔁 NORMALIZE TIMESTAMPS
     # ------------------------------
 
     timestamps_df.columns = [c.lower() for c in timestamps_df.columns]
 
-    timestamps_df = timestamps_df.rename(
-        columns={
-            "schema": "schema",
-            "name": "name",
-            "object_name": "name",
-            "create_date": "create_date",
-            "modify_date": "modify_date",
-        }
-    )
+    if dialect == "sqlserver":
+
+        timestamps_df = timestamps_df.rename(
+            columns={
+                "object_name": "name",
+                "schema": "schema",
+                "create_date": "create_date",
+                "modify_date": "modify_date",
+            }
+        )
+
+    else:  # snowflake already aligned
+
+        timestamps_df = timestamps_df.rename(
+            columns={
+                "object_name": "name",
+            }
+        )
+
+    # ------------------------------
+    # 🔗 Build full_name
+    # ------------------------------
 
     timestamps_df["full_name"] = (
         timestamps_df["schema"]
@@ -2370,6 +2471,104 @@ if "impacted_views" in st.session_state:
         )
 
         st.dataframe(final_df)
+        st.subheader("📊 Impact Summary")
+
+        # ----------------------------
+        # Detect risk column safely
+        # ----------------------------
+
+        risk_col = None
+
+        for candidate in [
+            "risk",
+            "severity",
+            "impact",
+            "risk_level",
+            "precedence",
+        ]:
+            if candidate in final_df.columns:
+                risk_col = candidate
+                break
+
+        if not risk_col:
+            st.warning("⚠️ No risk column found in LLM output.")
+            st.write("Columns available:", final_df.columns.tolist())
+        else:
+
+            final_df[risk_col] = final_df[risk_col].astype(str).str.upper()
+
+            st.metric("Total Impacted", len(final_df))
+            st.metric(
+                "High Risk",
+                len(final_df[final_df[risk_col] == "HIGH"])
+            )
+            st.metric(
+                "Medium Risk",
+                len(final_df[final_df[risk_col] == "MEDIUM"])
+            )
+            st.metric(
+                "Low Risk",
+                len(final_df[final_df[risk_col] == "LOW"])
+            )
+
+        # ============================
+        # 📦 BUILD IMPACT PAYLOAD
+        # ============================
+
+        risk_col = None
+        for c in ["risk", "severity", "impact", "risk_level", "precedence"]:
+            if c in final_df.columns:
+                risk_col = c
+                break
+
+        impact_payload = {
+            "base_object": table_name,
+            "total_impacted": len(final_df),
+            "objects": [],
+        }
+
+        for _, r in final_df.iterrows():
+
+            impact_payload["objects"].append(
+                {
+                    "object": r.get("view_name") or r.get("object"),
+                    "type": r.get("type", "VIEW"),
+                    "risk": r.get(risk_col),
+                }
+            )
+        # ============================
+        # 🧠 LLM EXEC SUMMARY
+        # ============================
+
+        st.subheader("🧠 Executive Impact Summary")
+
+        summary_prompt = f"""
+        You are a senior data architect.
+
+        Summarize the downstream impact of a schema change.
+
+        Base object:
+        {table_name}
+
+        Impact JSON:
+        {json.dumps(impact_payload, indent=2)}
+
+        Provide:
+        - 3 bullet summary
+        - Risk assessment
+        - Go / No-Go recommendation
+
+        Keep concise.
+        """
+
+        with st.spinner("Generating executive summary..."):
+
+            llm_summary = analyze_schema_changes_llm(
+                prompt=summary_prompt
+            )
+
+        st.markdown(llm_summary)
+
         st.subheader("📊 Impact Visualization")
 
     # viz_type = st.radio(
@@ -2405,6 +2604,31 @@ if "impacted_views" in st.session_state:
             "Risk is classified based on join type and SELECT usage. "
             "Precedence determines severity."
         )
+        # ============================
+        # 📥 DOWNLOAD REPORTS
+        # ============================
+
+        st.subheader("📥 Download Impact Reports")
+
+        impact_html = build_impact_html_report(
+            impact_payload=impact_payload,
+            llm_summary=llm_summary,
+        )
+
+        st.download_button(
+            "⬇ Download Impact Report (HTML)",
+            data=impact_html,
+            file_name="impact_report.html",
+            mime="text/html",
+        )
+
+        st.download_button(
+            "⬇ Download Impact JSON",
+            data=json.dumps(impact_payload, indent=2),
+            file_name="impact_report.json",
+            mime="application/json",
+        )
+# =========================
 
 if st.session_state.get("ingestion_mode") and st.session_state.get("decision"):
 

@@ -1,21 +1,38 @@
 import pandas as pd
 
-def get_tables(conn, dialect):
+def get_tables(conn, dialect, schema=None):
     if dialect == "sqlserver":
+
         query = """
         SELECT TABLE_SCHEMA, TABLE_NAME
         FROM INFORMATION_SCHEMA.TABLES
         WHERE TABLE_TYPE = 'BASE TABLE'
         """
-        return pd.read_sql(query, conn)
+
+        params = None
+
+        if schema:
+            query += " AND TABLE_SCHEMA = ?"
+            params = [schema]
+
+        return pd.read_sql(query, conn, params=params)
 
     elif dialect == "snowflake":
+
         query = """
         SELECT TABLE_SCHEMA, TABLE_NAME
         FROM INFORMATION_SCHEMA.TABLES
         WHERE TABLE_TYPE = 'BASE TABLE'
         """
-        return pd.read_sql(query, conn)
+
+        params = None
+
+        if schema:
+            query += " AND TABLE_SCHEMA = %s"
+            params = [schema]
+
+        return pd.read_sql(query, conn, params=params)
+
 
 
 def get_table_schema(conn, schema, table, dialect):
