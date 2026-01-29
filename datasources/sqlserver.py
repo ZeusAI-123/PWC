@@ -12,6 +12,7 @@ def get_sqlserver_connection(server, database, user, password, driver):
         f"UID={user};"
         f"PWD={password};"
         f"TrustServerCertificate=yes;"
+        f"MARS_Connection=Yes;"
     )
     return pyodbc.connect(conn_str)
 

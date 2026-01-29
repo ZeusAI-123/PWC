@@ -1,6 +1,7 @@
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -175,6 +176,60 @@ def generate_sql_documentation(object_name, object_type, object_sql):
             {"role": "system", "content": "You are an expert SQL technical documentation generator."},
             {"role": "user", "content": prompt}
         ]
+    )
+
+    return response.choices[0].message.content
+
+def build_change_analysis_prompt(change_json: dict) -> str:
+
+    return f"""
+You are a senior data platform architect.
+
+You are analyzing schema change detection output produced by an automated catalog scanner.
+
+The JSON below represents differences between a baseline snapshot and the current database state.
+
+Your job:
+
+1. Summarize changes in plain English.
+2. Group by object (table/view/procedure).
+3. Classify severity: LOW / MEDIUM / HIGH.
+4. Identify breaking changes for ingestion pipelines.
+5. Identify downstream risk for views/procs.
+6. Suggest what DDL likely caused this.
+7. Recommend actions for data engineers.
+8. Call out if this is safe or requires migration.
+9. If no changes exist, clearly say: "No schema changes detected."
+
+Rules:
+- Use ONLY the JSON provided.
+- Do NOT invent objects.
+- Do NOT assume anything outside the JSON.
+- If arrays are empty → explicitly say no changes.
+
+Return output in Markdown with these sections:
+
+## 🔍 Summary
+## 📦 Object Level Changes
+## ⚠️ Risk Assessment
+## 🛠️ Likely DDL Operations
+## ✅ Recommended Actions
+## 🧪 Safe or Breaking?
+
+Here is the change detection JSON:
+
+{json.dumps(change_json, indent=2)}
+"""
+
+def analyze_schema_changes_llm(prompt: str) -> str:
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a data warehouse architect."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,
     )
 
     return response.choices[0].message.content

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import os
 from spark.schema_compare import get_tables, get_table_schema
 from genai.sql_generator import get_ingestion_decision, classify_impacted_views_llm
-from genai.llm_summary import generate_sql_documentation
+from genai.llm_summary import generate_sql_documentation, build_change_analysis_prompt, analyze_schema_changes_llm
 from spark.schema_compare import get_file_schema
 from spark.lineage import get_impacted_views_snowflake, get_view_definitions
 from spark.ingest import insert_data
@@ -21,6 +21,23 @@ from spark.audit_logger import (
     log_app_action,
     log_db_change,
 )
+from catalog_snapshots.snapshot_store import (
+    get_baseline_snapshot_sqlite,
+    init_snapshot_tables,
+    migrate_snapshot_tables,
+    # persist_snapshot,
+    set_baseline,
+    # get_baseline,
+    # load_snapshot,
+    retain_last_n,
+    persist_snapshot_sqlite,
+)
+from catalog_snapshots.snapshot_builder import build_catalog_snapshot
+from catalog_snapshots.change_detector import (
+    compare_snapshots,
+    save_change_log,
+)
+init_snapshot_tables()
 
 # Load environment variables first
 st.session_state.setdefault("ingestion_mode", None)
@@ -243,15 +260,16 @@ WHERE o.type IN ('U','V','P','FN','IF','TF');
     return pd.read_sql(sql, conn)
 
 
-def get_object_timestamps_snowflake(conn, database):
+def get_object_timestamps_snowflake(conn, database, schema):
 
     tables_sql = f"""
     SELECT
-        TABLE_SCHEMA AS schema,
-        TABLE_NAME AS name,
-        CREATED AS create_date,
-        LAST_ALTERED AS modify_date
+        TABLE_SCHEMA   AS schema,
+        TABLE_NAME     AS name,
+        CREATED        AS create_date,
+        LAST_ALTERED   AS modify_date
     FROM {database}.INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = '{schema}'
     """
 
     df_tables = pd.read_sql(tables_sql, conn)
@@ -528,7 +546,10 @@ def get_procedures(conn, dialect):
 
     else:
         # snowflake logic stays
-        ...
+ # snowflake
+
+        return pd.DataFrame(columns=["schema", "name"])
+
 
 
 def detect_pii_llm(openai_client, table_name, sample_payload):
@@ -646,6 +667,37 @@ if st.button("Connect"):
 
         views_df = get_views(conn, dialect, schema, database)
         procs_df = get_procedures(conn, dialect)
+        if dialect == "sqlserver":
+            timestamps_df = get_object_timestamps_sqlserver(conn)
+        else:
+            timestamps_df = get_object_timestamps_snowflake(conn, database, schema)
+        # ------------------------------
+        # NORMALIZE TIMESTAMP DF
+        # ------------------------------
+
+        timestamps_df = timestamps_df.rename(
+            columns={
+                "SCHEMA": "schema",
+                "NAME": "name",
+                "CREATE_DATE": "create_date",
+                "MODIFY_DATE": "modify_date",
+            }
+        )
+
+        timestamps_df["full_name"] = (
+            timestamps_df["schema"]
+            + "."
+            + timestamps_df["name"]
+        )
+
+        timestamps_df = timestamps_df[
+            ["full_name", "create_date", "modify_date"]
+        ]
+
+        # st.write("DEBUG timestamps_df cols:", timestamps_df.columns.tolist())
+        # st.write(timestamps_df.head())
+
+
 
         tables_df["object_type"] = "TABLE"
         views_df["object_type"] = "VIEW"
@@ -671,6 +723,28 @@ if st.button("Connect"):
             ],
             ignore_index=True,
         )
+        # ------------------------------
+        # JOIN CREATE / MODIFY DATES
+        # ------------------------------
+
+        catalog_df = catalog_df.merge(
+            timestamps_df[
+                ["full_name", "create_date", "modify_date"]
+            ],
+            on="full_name",
+            how="left",
+        )
+
+        catalog_df["modify_date"] = (
+            catalog_df["modify_date"]
+            .fillna("UNKNOWN")
+        )
+
+        catalog_df["create_date"] = (
+            catalog_df["create_date"]
+            .fillna("UNKNOWN")
+        )
+
         # ---------------------------------------
 # 🔥 ADD CREATE / MODIFY TIMESTAMPS
 # ---------------------------------------
@@ -678,6 +752,8 @@ if st.button("Connect"):
         if dialect == "sqlserver":
 
             ts_df = get_object_timestamps_sqlserver(conn)
+            timestamps_df = ts_df.copy()
+
             # st.write("DEBUG ts_df columns:", ts_df.columns.tolist())
             # st.write("DEBUG ts_df preview:", ts_df.head())
 
@@ -693,7 +769,8 @@ if st.button("Connect"):
 
         elif dialect == "snowflake":
 
-            ts_df = get_object_timestamps_snowflake(conn, database)
+            ts_df = get_object_timestamps_snowflake(conn, database, schema)
+            timestamps_df = ts_df.copy()
 
             # -----------------------------
             # NORMALIZE TIMESTAMP DF
@@ -743,6 +820,167 @@ if st.button("Connect"):
         st.session_state.pop("catalog_overview", None)
         st.session_state["catalog_objects"] = catalog_df
         st.success(f"✅ Connected to {db_type}")
+        # st.write("TS cols:", timestamps_df.columns.tolist())
+        # st.write("Catalog preview:", catalog_df.head())
+
+        # ---------------------------------------
+        # 📐 BUILD FULL COLUMN SNAPSHOT
+        # ---------------------------------------
+
+        all_columns = []
+
+        for _, row in tables_df.iterrows():
+
+            schema_nm = row["TABLE_SCHEMA"]
+            table_nm = row["TABLE_NAME"]
+
+            try:
+                df_cols = get_table_schema(
+                    conn,
+                    schema_nm,
+                    table_nm,
+                    dialect
+                )
+
+                df_cols["schema"] = schema_nm
+                df_cols["object_name"] = table_nm
+                df_cols["object_type"] = "TABLE"
+
+                all_columns.append(df_cols)
+
+            except Exception:
+                pass
+
+
+        all_columns_df = (
+            pd.concat(all_columns, ignore_index=True)
+            if all_columns
+            else pd.DataFrame()
+        )
+        # ---------------------------------------
+        # 🔗 Add full_name for snapshot builder
+        # ---------------------------------------
+
+        if not all_columns_df.empty:
+
+            all_columns_df["full_name"] = (
+                all_columns_df["schema"]
+                + "."
+                + all_columns_df["object_name"]
+            )
+        # ---------------------------------------
+        # 🧹 Normalize column names for snapshot
+        # ---------------------------------------
+
+        all_columns_df.columns = [c.lower() for c in all_columns_df.columns]
+
+        rename_map = {
+            "column": "column_name",
+            "name": "column_name",
+            "columnname": "column_name",
+        }
+
+        all_columns_df = all_columns_df.rename(columns=rename_map)
+        required_cols = {
+            "schema",
+            "object_name",
+            "column_name",
+            "object_type",
+        }
+
+        missing = required_cols - set(all_columns_df.columns)
+
+        if missing:
+            raise RuntimeError(
+                f"Snapshot columns_df missing required columns: {missing}"
+            )
+
+        # ---------------------------------------
+        # 🧭 Add object_type to timestamps df
+        # ---------------------------------------
+
+        ts_df.columns = [c.lower() for c in ts_df.columns]
+
+        # Ensure full_name exists
+        if "full_name" not in ts_df.columns:
+
+            ts_df["full_name"] = (
+                ts_df["schema"]
+                + "."
+                + ts_df["name"]
+            )
+
+        catalog_df = st.session_state["catalog_objects"]
+
+        catalog_df.columns = [c.lower() for c in catalog_df.columns]
+
+        # Rename defensively
+        catalog_df = catalog_df.rename(
+            columns={
+                "schema_name": "schema",
+                "object_name": "name",
+                "type": "object_type",
+            }
+        )
+
+        required = {"full_name", "object_type"}
+
+        missing = required - set(catalog_df.columns)
+
+        if missing:
+            raise RuntimeError(
+                f"catalog_objects missing columns: {missing}"
+            )
+
+        ts_df = ts_df.merge(
+            catalog_df[["full_name", "object_type"]],
+            on="full_name",
+            how="left",
+        )
+
+        # If still null → hard fail so we see root cause
+        if ts_df["object_type"].isna().any():
+            raise RuntimeError(
+                "object_type NULL after merge in timestamps_df"
+            )
+
+
+
+        # st.write("TS DF COLS:", ts_df.columns.tolist())
+        # st.write("CATALOG OBJECT COLS:", st.session_state["catalog_objects"].columns.tolist())
+        timestamps_df = ts_df   # force correct one
+        # st.write("FINAL timestamps_df:", timestamps_df.columns.tolist())
+
+
+
+        snapshot = build_catalog_snapshot(
+            database=database,
+            schema=schema,
+            dialect=dialect,
+            tables_df=tables_df,
+            views_df=views_df,
+            procs_df=procs_df,
+            columns_df=all_columns_df,
+            timestamps_df=timestamps_df,
+        )
+
+        # snapshot_path = persist_snapshot(snapshot)
+        # st.write(snapshot.keys())
+
+        migrate_snapshot_tables()
+        snapshot_id = persist_snapshot_sqlite(snapshot)
+        st.session_state["latest_snapshot_id"] = snapshot_id
+
+        retain_last_n(10)
+
+        # st.session_state["latest_snapshot_path"] = snapshot_path
+        st.session_state["tables_df_snapshot"] = tables_df
+        st.session_state["views_df_snapshot"] = views_df
+        st.session_state["procs_df_snapshot"] = procs_df
+        st.session_state["columns_df_snapshot"] = all_columns_df
+        st.session_state["timestamps_df_snapshot"] = timestamps_df
+
+
 
         log_app_action(
             "CONNECT_DB",
@@ -849,6 +1087,14 @@ if "conn" in st.session_state:
 # PII DETECTION — ALL TABLES
 # =========================
 if st.session_state.get("ingestion_mode") == "DB Change":
+    # ----------------------------
+    # ⭐ Baseline Management
+    # ----------------------------
+
+    if st.button("⭐ Set Current Snapshot as Baseline"):
+        set_baseline(st.session_state["latest_snapshot_id"])
+        st.success("Baseline saved.")
+
     # 🔄 rebuild catalog when entering DB Change
     if "catalog_objects" not in st.session_state or st.session_state["catalog_objects"] is None:
         st.warning("⚠️ Schema catalog not loaded. Please reconnect.")
@@ -1023,6 +1269,7 @@ if st.session_state.get("ingestion_mode") == "DB Change":
                         st.session_state["catalog_selected_type"] = "PROC"
                         st.rerun()
 
+
     if st.session_state.get("catalog_selected"):
 
         st.divider()
@@ -1043,72 +1290,86 @@ if st.session_state.get("ingestion_mode") == "DB Change":
             db_name = database
         else:
             table_name = parts[0]
-            schema = schema
+            # schema = schema
+            schema = st.session_state.get("schema")
             db_name = database
 
         obj_type = st.session_state["catalog_selected_type"]
+        meta_df = get_table_schema(
+        conn,
+        schema,
+        table_name,
+        dialect
+    )
         # --------------------------------
         # 📘 FETCH VIEW DEFINITION
         # --------------------------------
 
-        view_sql = None
+        object_sql = None
 
-        if obj_type == "VIEW":
+        if obj_type in ["VIEW", "PROC"]:
 
             if dialect == "sqlserver":
 
                 sql = f"""
                 SELECT definition
                 FROM sys.sql_modules m
-                JOIN sys.views v ON m.object_id = v.object_id
-                WHERE SCHEMA_NAME(v.schema_id) = '{schema}'
-                AND v.name = '{table_name}'
+                JOIN sys.objects o
+                    ON m.object_id = o.object_id
+                JOIN sys.schemas s
+                    ON o.schema_id = s.schema_id
+                WHERE s.name = '{schema}'
+                AND o.name = '{table_name}'
                 """
 
             else:  # snowflake
 
+                ddl_type = "VIEW" if obj_type == "VIEW" else "PROCEDURE"
+
                 sql = f"""
-                SELECT GET_DDL('VIEW',
+                SELECT GET_DDL('{ddl_type}',
                     '{db_name}.{schema}.{table_name}')
                 """
 
             df_def = pd.read_sql(sql, conn)
 
-            view_sql = df_def.iloc[0, 0]
-        llm_doc = None
+            object_sql = df_def.iloc[0, 0]
 
-        if obj_type == "VIEW" and view_sql:
+        llm_doc = None
+        lineage = {}
+        downstream_views = None
+        downstream_procs = None
+
+
+        if obj_type in ["VIEW", "PROC"] and object_sql:
 
             with st.spinner("🧠 Generating technical summary with GenAI..."):
 
                 llm_doc = generate_sql_documentation(
                     object_name=selected,
-                    object_type="view",
-                    object_sql=view_sql
-                )
-                log_app_action(
-                    "GENERATE_VIEW_SUMMARY",
-                    object_name=selected,
-                    object_type="VIEW",
+                    object_type=obj_type.lower(),
+                    object_sql=object_sql
                 )
 
-        # =====================================
-    # 📘 VIEW DOCUMENTATION + LINEAGE UI
-    # =====================================
+                log_app_action(
+                    f"GENERATE_{obj_type}_SUMMARY",
+                    object_name=selected,
+                    object_type=obj_type,
+                )
 
             st.markdown("## 🧠 Description")
             st.markdown(llm_doc or "No description generated.")
 
-            st.markdown("## 🌐 Lineage")
+            lineage = extract_sql_lineage(object_sql)
 
-            lineage = extract_sql_lineage(view_sql)
             log_app_action(
                 "EXTRACT_LINEAGE",
                 object_name=selected,
-                object_type="VIEW",
+                object_type=obj_type,
                 details=lineage,
             )
 
+            st.markdown("## 🌐 Lineage")
 
             st.markdown("### Tables Used")
             st.write(lineage.get("tables", []))
@@ -1121,49 +1382,50 @@ if st.session_state.get("ingestion_mode") == "DB Change":
 
             st.markdown("### Functions Used")
             st.write(lineage.get("functions", []))
+
             downstream_views = None
             downstream_procs = None
 
             st.markdown("## 🔁 Relations")
 
             st.markdown("### Called by Views")
-            downstream_views = find_downstream_views(conn, db_name, schema, table_name)
+
+            downstream_views = find_downstream_views(
+                conn, db_name, schema, table_name
+            )
+
             if downstream_views is not None and not downstream_views.empty:
                 st.dataframe(downstream_views)
             else:
                 st.write("None")
-
 
             st.markdown("### Called by Procedures")
 
             if dialect == "sqlserver":
 
                 downstream_procs = find_downstream_procs(
-                    conn,
-                    db_name,
-                    schema,
-                    table_name
+                    conn, db_name, schema, table_name
                 )
 
                 if downstream_procs is not None and not downstream_procs.empty:
                     st.dataframe(downstream_procs)
                 else:
                     st.write("None")
+            overview_df = st.session_state.get("catalog_overview")
 
-            else:
-                st.write("Not applicable for Snowflake.")
+            row_meta = overview_df[
+                overview_df["full_name"] == selected
+            ].iloc[0]
 
+            modify_date = row_meta.get("modify_date")
+            create_date = row_meta.get("create_date")
 
-
-        # ----------------------------
-        # 📥 DOWNLOAD HTML REPORT
-        # ----------------------------
 
             html_report = build_view_html_report(
                 view_name=selected,
-                modify_date=row.get("modify_date"),
-                create_date=row.get("create_date"),
-                sql_text=view_sql,
+                modify_date=modify_date,
+                create_date=create_date,
+                sql_text=object_sql,
                 llm_doc=llm_doc,
                 lineage=lineage,
                 downstream_views=downstream_views,
@@ -1171,72 +1433,191 @@ if st.session_state.get("ingestion_mode") == "DB Change":
             )
 
             st.download_button(
-                label="📥 Download View Report (HTML)",
+                label=f"📥 Download {obj_type} Report (HTML)",
                 data=html_report,
-                file_name=f"{selected.replace('.', '_')}_catalog.html",
+                file_name=f"{selected.replace('.', '_')}_{obj_type.lower()}_catalog.html",
                 mime="text/html",
             )
-
-
-
-
-        if obj_type in ["TABLE", "VIEW"]:
-
-            meta_df = get_table_schema(
-                conn,
-                schema,
-                table_name,
-                dialect
-            )
-
-        else:  # PROC
-
-            if dialect == "sqlserver":
-
-                meta_sql = f"""
-                SELECT
-                    PARAMETER_NAME as column_name,
-                    DATA_TYPE as data_type,
-                    CHARACTER_MAXIMUM_LENGTH as length
-                FROM INFORMATION_SCHEMA.PARAMETERS
-                WHERE SPECIFIC_SCHEMA = '{schema}'
-                AND SPECIFIC_NAME = '{table_name}'
-                """
-
-            else:  # snowflake
-
-
-        # Snowflake-safe: DESCRIBE PROCEDURE
-                current_db = database  # already captured from UI
-
-                meta_sql = f"DESCRIBE PROCEDURE {current_db}.{schema}.{table_name}()"
-
-
-                meta_df = pd.read_sql(meta_sql, conn)
-
-                # Normalize DESCRIBE output
-                meta_df = meta_df.rename(
-                    columns={
-                        "name": "column_name",
-                        "type": "data_type"
-                    }
+            if "meta_df" not in locals() or meta_df is None:
+                meta_df = pd.DataFrame(
+                    columns=["column_name", "data_type", "length"]
                 )
 
-                meta_df = meta_df[["column_name", "data_type"]]
-                meta_df["length"] = None
+    #     # =====================================
+    # # 📘 VIEW DOCUMENTATION + LINEAGE UI
+    # # =====================================
+
+    #         st.markdown("## 🧠 Description")
+    #         st.markdown(llm_doc or "No description generated.")
+
+    #         st.markdown("## 🌐 Lineage")
+
+    #         lineage = extract_sql_lineage(view_sql)
+    #         log_app_action(
+    #             "EXTRACT_LINEAGE",
+    #             object_name=selected,
+    #             object_type="VIEW",
+    #             details=lineage,
+    #         )
+
+
+    #         st.markdown("### Tables Used")
+    #         st.write(lineage.get("tables", []))
+
+    #         st.markdown("### Views Used")
+    #         st.write(lineage.get("views", []))
+
+    #         st.markdown("### Procedures Used")
+    #         st.write(lineage.get("procedures", []))
+
+    #         st.markdown("### Functions Used")
+    #         st.write(lineage.get("functions", []))
+    #         downstream_views = None
+    #         downstream_procs = None
+
+    #         st.markdown("## 🔁 Relations")
+
+    #         st.markdown("### Called by Views")
+    #         downstream_views = find_downstream_views(conn, db_name, schema, table_name)
+    #         if downstream_views is not None and not downstream_views.empty:
+    #             st.dataframe(downstream_views)
+    #         else:
+    #             st.write("None")
+
+
+    #         st.markdown("### Called by Procedures")
+
+    #         if dialect == "sqlserver":
+
+    #             downstream_procs = find_downstream_procs(
+    #                 conn,
+    #                 db_name,
+    #                 schema,
+    #                 table_name
+    #             )
+
+    #             if downstream_procs is not None and not downstream_procs.empty:
+    #                 st.dataframe(downstream_procs)
+    #             else:
+    #                 st.write("None")
+
+    #         else:
+    #             st.write("Not applicable for Snowflake.")
 
 
 
-            meta_df = pd.read_sql(meta_sql, conn)
+    #     # ----------------------------
+    #     # 📥 DOWNLOAD HTML REPORT
+    #     # ----------------------------
 
-            if "length" not in meta_df:
-                meta_df["length"] = None
+    #         html_report = build_view_html_report(
+    #             view_name=selected,
+    #             modify_date=row.get("modify_date"),
+    #             create_date=row.get("create_date"),
+    #             sql_text=view_sql,
+    #             llm_doc=llm_doc,
+    #             lineage=lineage,
+    #             downstream_views=downstream_views,
+    #             downstream_procs=downstream_procs,
+    #         )
+
+    #         st.download_button(
+    #             label="📥 Download View Report (HTML)",
+    #             data=html_report,
+    #             file_name=f"{selected.replace('.', '_')}_catalog.html",
+    #             mime="text/html",
+    #         )
+
+
+
+
+    #     if obj_type in ["TABLE", "VIEW"]:
+
+    #         meta_df = get_table_schema(
+    #             conn,
+    #             schema,
+    #             table_name,
+    #             dialect
+    #         )
+
+    #     else:  # PROC
+
+    #         # =====================================
+    #         # ⚙️ PROC DOCUMENTATION + LINEAGE UI
+    #         # =====================================
+
+    #         proc_sql = None
+    #         proc_llm_doc = None
+
+    #         if obj_type == "PROC":
+
+    #             # ---------------------------
+    #             # FETCH PROC SQL
+    #             # ---------------------------
+
+    #             if dialect == "sqlserver":
+
+    #                 sql = f"""
+    #                 SELECT definition
+    #                 FROM sys.sql_modules m
+    #                 JOIN sys.objects o
+    #                     ON m.object_id = o.object_id
+    #                 JOIN sys.schemas s
+    #                     ON o.schema_id = s.schema_id
+    #                 WHERE s.name = '{schema}'
+    #                 AND o.name = '{table_name}'
+    #                 """
+
+    #             else:  # snowflake
+
+    #                 sql = f"""
+    #                 SELECT GET_DDL('PROCEDURE',
+    #                     '{db_name}.{schema}.{table_name}')
+    #                 """
+
+    #             df_def = pd.read_sql(sql, conn)
+
+    #             proc_sql = df_def.iloc[0, 0]
+
+    #             # ---------------------------
+    #             # LLM SUMMARY
+    #             # ---------------------------
+
+    #             with st.spinner("🧠 Generating procedure execution map..."):
+
+    #                 proc_llm_doc = generate_sql_documentation(
+    #                     object_name=selected,
+    #                     object_type="proc",
+    #                     object_sql=proc_sql
+    #                 )
+
+    #                 log_app_action(
+    #                     "GENERATE_PROC_SUMMARY",
+    #                     object_name=selected,
+    #                     object_type="PROC",
+    #                 )
+
+    #             # ---------------------------
+    #             # DISPLAY
+    #             # ---------------------------
+
+    #             st.markdown("## 🧠 Execution Summary")
+    #             st.markdown(proc_llm_doc or "No summary generated.")
 
 
 
         # ----------------------------
         # 🔥 Normalize / enrich columns
         # ----------------------------
+    #     if "meta_df" not in locals() or meta_df is None:
+    #         meta_df = pd.DataFrame(
+    #             columns=[
+    #                 "column_name",
+    #                 "data_type",
+    #                 "length",
+    #     ]
+    # )
+
 
         meta_df.columns = [c.lower() for c in meta_df.columns]
 
@@ -1279,6 +1660,14 @@ if st.session_state.get("ingestion_mode") == "DB Change":
             "pii",
             "tag"
         ]
+        # Always show PROC metadata (read-only in DB Change)
+        if obj_type == "PROC":
+            st.markdown("## ⚙️ Procedure Parameters")
+            st.dataframe(
+                meta_df[display_cols[:3]],
+                use_container_width=True
+            )
+
         show_editor = not (
             st.session_state.get("ingestion_mode") == "DB Change"
             and obj_type in ["VIEW", "PROC"]
@@ -1322,6 +1711,290 @@ if st.session_state.get("ingestion_mode") == "DB Change":
                     object_type=st.session_state["catalog_selected_type"],
                 )
 
+if st.session_state.get("ingestion_mode") == "Change Detection":
+
+    st.subheader("🔍 Change Detection")
+
+    conn = st.session_state["conn"]
+    dialect = st.session_state["db_dialect"]
+    baseline_snapshot = get_baseline_snapshot_sqlite()
+    st.write("BASELINE OBJECT COUNTS:")
+    for t, objs in baseline_snapshot["objects"].items():
+        st.write(t, len(objs))
+
+
+    if not baseline_snapshot:
+        st.warning("⚠️ No baseline defined yet.")
+        st.stop()
+
+    # 🔁 ALWAYS RE-SCAN DB
+    tables_df = get_tables(conn, dialect)
+    tables_df["object_type"] = "TABLE"
+    tables_df["full_name"] = (
+        tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+    )
+
+    views_df = get_views(conn, dialect, schema, database)
+    procs_df = get_procedures(conn, dialect)
+    views_df["object_type"] = "VIEW"
+    views_df["full_name"] = views_df["schema"] + "." + views_df["name"]
+
+    procs_df["object_type"] = "PROC"
+    procs_df["full_name"] = procs_df["schema"] + "." + procs_df["name"]
+
+
+    if dialect == "sqlserver":
+        timestamps_df = get_object_timestamps_sqlserver(conn)
+    else:
+        timestamps_df = get_object_timestamps_snowflake(conn, database, schema)
+    # ------------------------------
+    # 🔁 NORMALIZE TIMESTAMPS
+    # ------------------------------
+
+    timestamps_df.columns = [c.lower() for c in timestamps_df.columns]
+
+    timestamps_df = timestamps_df.rename(
+        columns={
+            "schema": "schema",
+            "name": "name",
+            "object_name": "name",
+            "create_date": "create_date",
+            "modify_date": "modify_date",
+        }
+    )
+
+    timestamps_df["full_name"] = (
+        timestamps_df["schema"]
+        + "."
+        + timestamps_df["name"]
+    )
+
+    # join object_type from catalog scan
+    catalog_df = pd.concat(
+        [
+            tables_df.assign(object_type="TABLE")[
+                ["TABLE_SCHEMA", "TABLE_NAME", "object_type"]
+            ]
+            .rename(
+                columns={
+                    "TABLE_SCHEMA": "schema",
+                    "TABLE_NAME": "name",
+                }
+            ),
+
+            views_df.assign(object_type="VIEW")[["schema", "name", "object_type"]],
+            procs_df.assign(object_type="PROC")[["schema", "name", "object_type"]],
+        ]
+    )
+
+    catalog_df["full_name"] = (
+        catalog_df["schema"] + "." + catalog_df["name"]
+    )
+    # ----------------------------------
+    # 🔧 NORMALIZE FULL_NAME CASE
+    # ----------------------------------
+
+    timestamps_df["full_name"] = timestamps_df["full_name"].str.upper()
+    catalog_df["full_name"] = catalog_df["full_name"].str.upper()
+
+
+    timestamps_df = timestamps_df.merge(
+        catalog_df[["full_name", "object_type"]],
+        on="full_name",
+        how="left",
+    )
+
+    missing = timestamps_df[
+        timestamps_df["full_name"].isin(
+            catalog_df["full_name"]
+        ) == False
+    ]
+
+    # st.write("❗ TIMESTAMPS NOT IN CATALOG:", missing.head(20))
+    # st.write(timestamps_df[["full_name"]].head(5))
+    # st.write(catalog_df[["full_name"]].head(5))
+
+
+    if timestamps_df["object_type"].isna().any():
+        st.error("❌ object_type missing in timestamps_df")
+        st.stop()
+
+
+    # 🔁 rebuild columns fresh
+    all_columns = []
+
+    for _, row in tables_df.iterrows():
+
+        schema_nm = row["TABLE_SCHEMA"]
+        table_nm = row["TABLE_NAME"]
+
+        df_cols = get_table_schema(
+            conn,
+            schema_nm,
+            table_nm,
+            dialect,
+        )
+
+        df_cols["schema"] = schema_nm
+        df_cols["object_name"] = table_nm
+        df_cols["object_type"] = "TABLE"
+
+        all_columns.append(df_cols)
+
+    all_columns_df = pd.concat(all_columns, ignore_index=True)
+    all_columns_df.columns = [c.lower() for c in all_columns_df.columns]
+
+    all_columns_df = all_columns_df.rename(
+    columns={
+        "column": "column_name",
+        "name": "column_name",
+    }
+)
+
+    # -----------------------------
+    # 🔗 Build full_name for snapshot
+    # -----------------------------
+
+    all_columns_df["full_name"] = (
+        all_columns_df["schema"]
+        + "."
+        + all_columns_df["object_name"]
+    )
+
+    # ---------------------------
+
+
+#     required_keys = [
+#         "tables_df_snapshot",
+#         "views_df_snapshot",
+#         "procs_df_snapshot",
+#         "columns_df_snapshot",
+#         "timestamps_df_snapshot",
+#     ]
+
+#     missing = [
+#     k for k in required_keys
+#     if k not in st.session_state or st.session_state[k] is None
+# ]
+
+
+#     if missing:
+#         st.error(
+#             f"❌ Snapshot metadata missing: {missing}. "
+#             "Please reconnect to DB."
+#         )
+#         st.stop()
+
+#     tables_df = st.session_state["tables_df_snapshot"]
+#     views_df = st.session_state["views_df_snapshot"]
+#     procs_df = st.session_state["procs_df_snapshot"]
+#     all_columns_df = st.session_state["columns_df_snapshot"]
+#     timestamps_df = st.session_state["timestamps_df_snapshot"]
+
+
+    # baseline_info = get_baseline()
+
+    # if not baseline_info:
+    #     st.warning("⚠️ No baseline defined yet.")
+    #     st.stop()
+
+    # baseline_snapshot = load_snapshot(
+    #     baseline_info["baseline_path"]
+    # )
+    
+    required_cols = {
+        "full_name",
+        "object_type",
+    }
+
+    for df_name, df in {
+        "tables_df": tables_df,
+        "views_df": views_df,
+        "procs_df": procs_df,
+        "timestamps_df": timestamps_df,
+        "all_columns_df": all_columns_df,
+    }.items():
+
+        missing = required_cols - set(df.columns)
+
+        if missing:
+            st.error(f"❌ {df_name} missing columns: {missing}")
+            st.stop()
+
+
+
+    current_snapshot = build_catalog_snapshot(
+        database=database,
+        schema=schema,
+        dialect=dialect,
+        tables_df=tables_df,
+        views_df=views_df,
+        procs_df=procs_df,
+        columns_df=all_columns_df,
+        timestamps_df=timestamps_df,
+    )
+    st.write("CURRENT OBJECT COUNTS:")
+    for t, objs in current_snapshot["objects"].items():
+        st.write(t, len(objs))
+
+
+    # current_path = persist_snapshot(current_snapshot)
+    persist_snapshot_sqlite(current_snapshot)
+
+    changes = compare_snapshots(
+        baseline_snapshot,
+        current_snapshot,
+    )
+
+    # change_log_path = save_change_log(changes)
+
+    st.subheader("🔎 Detected Schema Changes")
+    st.json(changes)
+    st.subheader("📊 Table-Level Change Matrix")
+
+    table_rows = []
+
+    for change_type, items in changes.items():
+
+        if change_type == "metadata":
+            continue
+
+        for item in items:
+
+            table_rows.append({
+                "object": item["object"],
+                "type": item["type"],
+                "change_type": change_type,
+                "column": item.get("column"),
+                "before": item.get("before"),
+                "after": item.get("after"),
+            })
+
+    if table_rows:
+
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+
+    else:
+        st.success("✅ No table-level schema changes detected.")
+
+    st.subheader("🧠 LLM Impact Analysis")
+
+    with st.spinner("Analyzing schema changes with LLM..."):
+
+        analysis_prompt = build_change_analysis_prompt(changes)
+
+        llm_response = analyze_schema_changes_llm(
+            prompt=analysis_prompt
+        )
+
+    st.markdown(llm_response)
+
+    st.download_button(
+        "📥 Download change_log.json",
+        data=json.dumps(changes, indent=2),
+        file_name="change_log.json",
+        mime="application/json",
+    )
 
 
 if st.session_state.get("ingestion_mode") == "Detect PII from Existing Table":
@@ -1457,12 +2130,25 @@ if st.session_state["ingestion_mode"] and "tables" in st.session_state:
     
         dialect = st.session_state["db_dialect"]
     
-        if "selected_table" in locals():
-            if dialect == "sqlserver":
-                schema, table_name = selected_table.split(".")
+        # if "selected_table" in locals():
+        #     if dialect == "sqlserver":
+        #         schema, table_name = selected_table.split(".")
+        #     else:
+        #         schema = None
+        #         table_name = selected_table
+        if dialect == "sqlserver":
+            schema, table_name = selected_table.split(".")
+
+        else:  # snowflake
+            parts = selected_table.split(".")
+            if len(parts) == 2:
+                schema, table_name = parts
+            elif len(parts) == 3:
+                _, schema, table_name = parts
             else:
-                schema = None
+                schema = st.session_state.get("schema")
                 table_name = selected_table
+
     
 # # =========================
 # # PII DETECTION MODE (READ-ONLY)
@@ -1837,109 +2523,3 @@ if (
             "PII Columns Detected",
             len(result_df[result_df["classification"].isin(["PII", "POSSIBLE_PII"])])
         )
-
-
-
-# st.set_page_config(page_title="GenAI Ingestion POC", layout="wide")
-# st.title("🧠 GenAI-Driven SQL Ingestion")
-
-# # --- DB Inputs ---
-# st.sidebar.header("🔌 SQL Server Connection")
-# server = st.text_input("SQL Server", "123.124.0.9\\CONNECTDB")
-# database = st.text_input("Database", "PowerBI")
-# user = st.text_input("User")
-# password = st.text_input("Password", type="password")
-# driver = st.text_input("ODBC Driver", "ODBC Driver 17 for SQL Server")
-
-# if st.button("Connect"):
-#     conn = get_sqlserver_connection(server, database, user, password, driver)
-#     st.session_state["conn"] = conn
-#     tables_df = get_tables(conn)
-#     st.session_state["tables"] = tables_df
-#     st.success("Connected successfully")
-
-# # --- Table Selection ---
-# if "tables" in st.session_state:
-#     tables_df = st.session_state["tables"]
-#     tables_df["full"] = tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
-
-#     selected = st.selectbox("Select Target Table", tables_df["full"])
-#     schema, table = selected.split(".")
-#     st.session_state["selected_table"] = selected
-
-# # --- File Upload ---
-# file = st.file_uploader("Upload CSV / Excel", type=["csv", "xlsx"])
-
-# if file and selected:
-#     conn = st.session_state["conn"]
-
-#     df_file, file_schema = get_file_schema(file)
-#     db_schema = get_table_schema(conn, schema, table)
-
-#     st.subheader("📊 Schema Comparison")
-#     col1, col2 = st.columns(2)
-
-#     with col1:
-#         st.write("DB Table Schema")
-#         st.dataframe(db_schema)
-
-#     with col2:
-#         st.write("Uploaded File Schema")
-#         st.dataframe(file_schema)
-
-#     st.metric("DB Columns", len(db_schema))
-#     st.metric("File Columns", len(file_schema))
-
-#     if st.button("Ask GenAI"):
-#         decision = get_ingestion_decision(openai_client, db_schema, file_schema, st.session_state["selected_table"])
-#         st.subheader("🤖 GenAI Decision")
-#         st.code(decision, language="json")
-#         st.session_state["genai_decision"] = decision
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
