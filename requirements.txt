@@ -5,5 +5,7 @@ pandas
 python-dotenv
 openai
 pymongo
-
-
+pyvis 
+networkx
+plotly
+streamlit-mermaid

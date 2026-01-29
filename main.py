@@ -11,10 +11,13 @@ from spark.schema_compare import get_file_schema
 from spark.lineage import get_impacted_views_snowflake, get_view_definitions
 from spark.ingest import insert_data
 from openai import OpenAI
+import plotly.graph_objects as go
 import re
 import json
 import time
 import sqlite3
+from spark.impact_graph import build_dependency_graph, render_graph
+from streamlit.components.v1 import html
 from spark.audit_logger import (
     init_app_action_log,
     init_db_change_log,
@@ -2367,6 +2370,36 @@ if "impacted_views" in st.session_state:
         )
 
         st.dataframe(final_df)
+        st.subheader("📊 Impact Visualization")
+
+    # viz_type = st.radio(
+    #     "Choose visualization style:",
+    #     ["Network Graph", "Hierarchy Tree", "Sankey Flow", "Mermaid Diagram"],
+    #     horizontal=True,
+    # )
+        st.markdown(
+    """
+### 🎨 Risk Legend
+🟥 **High Impact**  
+🟨 **Medium Impact**  
+🟩 **Low Impact**  
+🟪 **Procedure**  
+🟦 **Base Table**
+"""
+)
+    
+        st.subheader("🕸 Dependency Graph")
+
+        G = build_dependency_graph(
+            base_object=table_name,
+            impacted_views_df=df,
+            risk_df=final_df,
+        )
+
+        graph_path = render_graph(G)
+
+        with open(graph_path, "r", encoding="utf-8") as f:
+            html(f.read(), height=650)
 
         st.caption(
             "Risk is classified based on join type and SELECT usage. "
