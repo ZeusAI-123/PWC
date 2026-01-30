@@ -730,7 +730,20 @@ if st.button("Connect"):
         st.session_state["db_dialect"] = dialect
         st.session_state["schema"] = schema
 
-        tables_df = get_tables(conn, dialect, schema)
+        tables_df = get_tables(conn, dialect, schema, database)
+        # -------------------------------
+        # 🔁 NORMALIZE TABLE LIST
+        # -------------------------------
+
+        tables_df.columns = [c.lower() for c in tables_df.columns]
+
+        tables_df = tables_df.rename(
+            columns={
+                "table_schema": "schema",
+                "table_name": "name",
+            }
+        )
+
         st.session_state["tables"] = tables_df
 
         views_df = get_views(conn, dialect, schema, database)
@@ -790,8 +803,9 @@ if st.button("Connect"):
         procs_df["object_type"] = "PROC"
 
         tables_df["full_name"] = (
-            tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+            tables_df["schema"] + "." + tables_df["name"]
         )
+
 
         views_df["full_name"] = (
             views_df["schema"] + "." + views_df["name"]
@@ -912,20 +926,36 @@ if st.button("Connect"):
         # ---------------------------------------
         # 📐 BUILD FULL COLUMN SNAPSHOT
         # ---------------------------------------
-
+        
         all_columns = []
 
         for _, row in tables_df.iterrows():
 
-            schema_nm = row["TABLE_SCHEMA"]
-            table_nm = row["TABLE_NAME"]
+            schema_nm = str(row["schema"]).upper()
+            table_nm = str(row["name"]).upper()
+            # if dialect == "snowflake":
+            #     st.write("🧪 Snowflake debug:")
+            #     st.write("Database:", database)
+            #     st.write("Schema:", schema_nm)
+            #     st.write("Table:", table_nm)
+
+            #     try:
+            #         st.write(
+            #             pd.read_sql(
+            #                 "SELECT CURRENT_DATABASE(), CURRENT_SCHEMA(), CURRENT_ROLE()",
+            #                 conn,
+            #             )
+            #         )
+            #     except Exception as e:
+            #         st.write("Debug query failed:", e)
 
             try:
                 df_cols = get_table_schema(
                     conn,
                     schema_nm,
                     table_nm,
-                    dialect
+                    dialect, 
+                    database,
                 )
 
                 df_cols["schema"] = schema_nm
@@ -934,8 +964,10 @@ if st.button("Connect"):
 
                 all_columns.append(df_cols)
 
-            except Exception:
-                pass
+            except Exception as e:
+                st.error(f"❌ get_table_schema failed for {schema_nm}.{table_nm}: {e}")
+                raise
+
 
 
         all_columns_df = (
@@ -943,6 +975,15 @@ if st.button("Connect"):
             if all_columns
             else pd.DataFrame()
         )
+        # st.write("🧪 all_columns_df cols:", all_columns_df.columns.tolist())
+        # st.write(all_columns_df.head())
+
+        if all_columns_df.empty:
+            raise RuntimeError(
+                "No column metadata collected from Snowflake — "
+                "get_table_schema returned nothing."
+            )
+
         # ---------------------------------------
         # 🔗 Add full_name for snapshot builder
         # ---------------------------------------
@@ -958,15 +999,56 @@ if st.button("Connect"):
         # 🧹 Normalize column names for snapshot
         # ---------------------------------------
 
+        # all_columns_df.columns = [c.lower() for c in all_columns_df.columns]
+
+        # rename_map = {
+        #     "column": "column_name",
+        #     "name": "column_name",
+        #     "columnname": "column_name",
+        # }
+
+        # all_columns_df = all_columns_df.rename(columns=rename_map)
+        # required_cols = {
+        #     "schema",
+        #     "object_name",
+        #     "column_name",
+        #     "object_type",
+        # }
+
+        # missing = required_cols - set(all_columns_df.columns)
+
+        # if missing:
+        #     raise RuntimeError(
+        #         f"Snapshot columns_df missing required columns: {missing}"
+        #     )
+
+        # # ---------------------------------------
+        # # 🧭 Add object_type to timestamps df
+        # # ---------------------------------------
+        # ---------------------------------------
+        # ---------------------------------------
+        # 🧹 Normalize column names for snapshot
+        # ---------------------------------------
+
         all_columns_df.columns = [c.lower() for c in all_columns_df.columns]
 
         rename_map = {
+            # column
             "column": "column_name",
             "name": "column_name",
             "columnname": "column_name",
+
+            # table/object
+            "table_name": "object_name",
+            "tablename": "object_name",
+
+            # schema
+            "table_schema": "schema",
+            "schema_name": "schema",
         }
 
         all_columns_df = all_columns_df.rename(columns=rename_map)
+
         required_cols = {
             "schema",
             "object_name",
@@ -981,9 +1063,6 @@ if st.button("Connect"):
                 f"Snapshot columns_df missing required columns: {missing}"
             )
 
-        # ---------------------------------------
-        # 🧭 Add object_type to timestamps df
-        # ---------------------------------------
 
         ts_df.columns = [c.lower() for c in ts_df.columns]
 
@@ -1038,6 +1117,10 @@ if st.button("Connect"):
         # st.write("FINAL timestamps_df:", timestamps_df.columns.tolist())
 
 
+        # st.write("🧪 Baseline scan counts:")
+        # st.write("Tables:", len(tables_df))
+        # st.write("Views:", len(views_df))
+        # st.write("Procs:", len(procs_df))
 
         snapshot = build_catalog_snapshot(
             database=database,
@@ -1109,7 +1192,7 @@ with st.container():
         
             if conn and dialect:
                 schema = st.session_state.get("schema")
-                tables_df = get_tables(conn, dialect, schema)
+                tables_df = get_tables(conn, dialect, schema, database)
 
                 st.session_state["tables"] = tables_df
 
@@ -1137,28 +1220,28 @@ with st.container():
 if "conn" in st.session_state:
     st.subheader("🧭 Select Operation")
 
-    ingestion_mode = st.radio(
-        "Choose ingestion type",
-        [
-            "DB Change",
-            "Ingest into Existing Table",
-            "Create New Table & Ingest",
-            
-            "Change Detection"
-            # "Detect PII from Existing Table"
-        ],
-        index=None
-    )
-
     # ingestion_mode = st.radio(
     #     "Choose ingestion type",
     #     [
     #         "DB Change",
-    #         "Change Detection",
-
+    #         "Ingest into Existing Table",
+    #         "Create New Table & Ingest",
+            
+    #         "Change Detection"
+    #         # "Detect PII from Existing Table"
     #     ],
     #     index=None
     # )
+
+    ingestion_mode = st.radio(
+        "Choose ingestion type",
+        [
+            "DB Change",
+            "Change Detection",
+
+        ],
+        index=None
+    )
 
     st.session_state["ingestion_mode"] = ingestion_mode
     if ingestion_mode:
@@ -1178,6 +1261,10 @@ if st.session_state.get("ingestion_mode") == "DB Change":
     # ----------------------------
     # ⭐ Baseline Management
     # ----------------------------
+    # st.write("🔍 Active schema:", st.session_state.get("schema"))
+
+
+
 
     if st.button("⭐ Set Current Snapshot as Baseline"):
         set_baseline(st.session_state["latest_snapshot_id"])
@@ -1806,7 +1893,16 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
     conn = st.session_state["conn"]
     dialect = st.session_state["db_dialect"]
     baseline_snapshot = get_baseline_snapshot_sqlite()
+    # st.write("🧪 Baseline snapshot object types:", baseline_snapshot["objects"].keys())
+
     st.write("BASELINE OBJECT COUNTS:")
+    for k in baseline_snapshot["objects"]:
+        baseline_snapshot["objects"][k] = {
+        obj.upper(): meta
+        for obj, meta in baseline_snapshot["objects"][k].items()
+    }
+
+
     for t, objs in baseline_snapshot["objects"].items():
         st.write(t, len(objs))
 
@@ -1817,20 +1913,41 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
 
     # 🔁 ALWAYS RE-SCAN DB
     schema = st.session_state.get("schema")
-    tables_df = get_tables(conn, dialect, schema)
+    tables_df = get_tables(conn, dialect, schema, database)
+
+    tables_df["schema"] = tables_df["TABLE_SCHEMA"].astype(str).str.upper()
+    tables_df["name"] = tables_df["TABLE_NAME"].astype(str).str.upper()
 
     tables_df["object_type"] = "TABLE"
     tables_df["full_name"] = (
-        tables_df["TABLE_SCHEMA"] + "." + tables_df["TABLE_NAME"]
+        tables_df["schema"] + "." + tables_df["name"]
     )
+
 
     views_df = get_views(conn, dialect, schema, database)
     procs_df = get_procedures(conn, dialect, schema)
+    views_df["schema"] = views_df["schema"].astype(str).str.upper()
+    views_df["name"] = views_df["name"].astype(str).str.upper()
+
     views_df["object_type"] = "VIEW"
-    views_df["full_name"] = views_df["schema"] + "." + views_df["name"]
+    views_df["full_name"] = (
+        views_df["schema"] + "." + views_df["name"]
+    )
+
+
+    procs_df["schema"] = procs_df["schema"].astype(str).str.upper()
+    procs_df["name"] = procs_df["name"].astype(str).str.upper()
 
     procs_df["object_type"] = "PROC"
-    procs_df["full_name"] = procs_df["schema"] + "." + procs_df["name"]
+    procs_df["full_name"] = (
+        procs_df["schema"] + "." + procs_df["name"]
+    )
+    # st.write("🧪 Current scan counts:")
+    # st.write("Tables:", len(tables_df))
+    # st.write("Views:", len(views_df))
+    # st.write("Procs:", len(procs_df))
+
+
 
 
     if dialect == "sqlserver":
@@ -1937,6 +2054,7 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
             schema_nm,
             table_nm,
             dialect,
+            database,
         )
 
         df_cols["schema"] = schema_nm
@@ -2026,6 +2144,7 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
             st.stop()
 
 
+    # st.write("🔍 Active schema:", st.session_state.get("schema"))
 
     current_snapshot = build_catalog_snapshot(
         database=database,
@@ -2037,10 +2156,21 @@ if st.session_state.get("ingestion_mode") == "Change Detection":
         columns_df=all_columns_df,
         timestamps_df=timestamps_df,
     )
+
+    # -------------------------------
+    # 🔁 Normalize CURRENT snapshot casing
+    # -------------------------------
+
     st.write("CURRENT OBJECT COUNTS:")
+
+    for k in current_snapshot["objects"]:
+        current_snapshot["objects"][k] = {
+            obj.upper(): meta
+            for obj, meta in current_snapshot["objects"][k].items()
+        }
+
     for t, objs in current_snapshot["objects"].items():
         st.write(t, len(objs))
-
 
     # current_path = persist_snapshot(current_snapshot)
     persist_snapshot_sqlite(current_snapshot)

@@ -1,6 +1,6 @@
 import pandas as pd
 
-def get_tables(conn, dialect, schema=None):
+def get_tables(conn, dialect, schema=None, database=None):
     if dialect == "sqlserver":
 
         query = """
@@ -19,9 +19,12 @@ def get_tables(conn, dialect, schema=None):
 
     elif dialect == "snowflake":
 
-        query = """
+        if not database:
+            raise ValueError("Snowflake requires schema for table discovery")
+
+        query = f"""
         SELECT TABLE_SCHEMA, TABLE_NAME
-        FROM INFORMATION_SCHEMA.TABLES
+        FROM {database}.INFORMATION_SCHEMA.TABLES
         WHERE TABLE_TYPE = 'BASE TABLE'
         """
 
@@ -29,28 +32,66 @@ def get_tables(conn, dialect, schema=None):
 
         if schema:
             query += " AND TABLE_SCHEMA = %s"
-            params = [schema]
+            params = [schema.upper()]
 
         return pd.read_sql(query, conn, params=params)
 
 
 
-def get_table_schema(conn, schema, table, dialect):
+
+# def get_table_schema(conn, schema, table, dialect):
+#     if dialect == "sqlserver":
+#         query = f"""
+#         SELECT COLUMN_NAME, DATA_TYPE
+#         FROM INFORMATION_SCHEMA.COLUMNS
+#         WHERE TABLE_SCHEMA = '{schema}'
+#           AND TABLE_NAME = '{table}'
+#         """
+#     else:  # snowflake
+#         query = f"""
+#         SELECT COLUMN_NAME, DATA_TYPE
+#         FROM INFORMATION_SCHEMA.COLUMNS
+#         WHERE TABLE_NAME = '{table}'
+#         """
+
+#     return pd.read_sql(query, conn)
+def get_table_schema(conn, schema, table, dialect, database=None):
+
     if dialect == "sqlserver":
-        query = f"""
+
+        query = """
         SELECT COLUMN_NAME, DATA_TYPE
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = '{schema}'
-          AND TABLE_NAME = '{table}'
-        """
-    else:  # snowflake
-        query = f"""
-        SELECT COLUMN_NAME, DATA_TYPE
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = '{table}'
+        WHERE TABLE_SCHEMA = ?
+          AND TABLE_NAME = ?
         """
 
-    return pd.read_sql(query, conn)
+        return pd.read_sql(query, conn, params=[schema, table])
+
+    else:  # snowflake
+
+        if not database:
+            raise ValueError("Snowflake requires database name for column discovery")
+
+        query = f"""
+        SELECT
+            TABLE_SCHEMA,
+            TABLE_NAME,
+            COLUMN_NAME,
+            DATA_TYPE
+        FROM {database}.INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = %s
+          AND TABLE_NAME = %s
+        ORDER BY ORDINAL_POSITION
+        """
+
+        return pd.read_sql(
+    query,
+    conn,
+    params=[schema.upper(), table.upper()],
+)
+
+
 
 
 def get_file_schema(file):
