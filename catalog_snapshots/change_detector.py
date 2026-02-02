@@ -1,6 +1,6 @@
 import json
 import datetime
-
+import pandas as pd
 
 # --------------------------------------------------
 # 🔍 Snapshot Comparison Engine
@@ -133,16 +133,21 @@ def compare_snapshots(baseline: dict, current: dict) -> dict:
                         }
                     )
 
-                if b.get("length") != n.get("length"):
-                    changes["length_changed"].append(
-                        {
-                            "object": obj,
-                            "type": obj_type,
-                            "column": c,
-                            "before": b.get("length"),
-                            "after": n.get("length"),
-                        }
-                    )
+                b_len = b.get("length")
+                n_len = n.get("length")
+
+                # Ignore NULL -> NULL
+                if not (pd.isna(b_len) and pd.isna(n_len)):
+                    if b_len != n_len:
+                        changes["length_changed"].append(
+                            {
+                                "object": obj,
+                                "type": obj_type,
+                                "column": c,
+                                "before": b_len,
+                                "after": n_len,
+                            }
+                        )
             # ---------------------------
             # 🔑 Key / Index Changes
             # ---------------------------
