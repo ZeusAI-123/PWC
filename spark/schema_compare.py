@@ -60,15 +60,19 @@ def get_table_schema(conn, schema, table, dialect, database=None):
     if dialect == "sqlserver":
 
         query = """
-        SELECT COLUMN_NAME, DATA_TYPE
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = ?
-          AND TABLE_NAME = ?
-        """
+    SELECT
+        COLUMN_NAME,
+        DATA_TYPE,
+        CHARACTER_MAXIMUM_LENGTH AS length,
+        IS_NULLABLE
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = ?
+      AND TABLE_NAME = ?
+    """
 
         return pd.read_sql(query, conn, params=[schema, table])
 
-    else:  # snowflake
+    elif dialect == "snowflake":  # snowflake
 
         if not database:
             raise ValueError("Snowflake requires database name for column discovery")
@@ -88,7 +92,6 @@ def get_table_schema(conn, schema, table, dialect, database=None):
         return pd.read_sql(
     query,
     conn,
-    params=[schema.upper(), table.upper()],
 )
 
 

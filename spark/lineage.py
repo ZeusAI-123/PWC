@@ -28,3 +28,32 @@ def get_view_definitions(conn, database, schema, view_names):
     """
 
     return pd.read_sql(query, conn)
+
+def get_impacted_objects_sqlserver(conn, schema, table):
+
+    query = """
+    SELECT
+        sch.name AS base_schema,
+        obj.name AS base_object,
+
+        sch2.name AS dependent_schema,
+        obj2.name AS dependent_object,
+        obj2.type_desc AS dependent_type
+
+    FROM sys.sql_expression_dependencies d
+
+    JOIN sys.objects obj
+        ON d.referenced_id = obj.object_id
+    JOIN sys.schemas sch
+        ON obj.schema_id = sch.schema_id
+
+    JOIN sys.objects obj2
+        ON d.referencing_id = obj2.object_id
+    JOIN sys.schemas sch2
+        ON obj2.schema_id = sch2.schema_id
+
+    WHERE sch.name = ?
+      AND obj.name = ?
+    """
+
+    return pd.read_sql(query, conn, params=[schema, table])
