@@ -61,6 +61,31 @@ def build_overview(df, obj_type):
         out["full_name"] = out["schema"] + "." + out["name"]
 
     return out
+
+def _build_full_names(df):
+    if df is None or df.empty:
+        return []
+
+    cols = [c.lower() for c in df.columns]
+
+    df2 = df.copy()
+    df2.columns = cols
+
+    if {"schema", "view_name"} <= set(cols):
+        return (df2["schema"] + "." + df2["view_name"]).tolist()
+
+    if {"schema_name", "view_name"} <= set(cols):
+        return (df2["schema_name"] + "." + df2["view_name"]).tolist()
+
+    if {"table_schema", "table_name"} <= set(cols):
+        return (df2["table_schema"] + "." + df2["table_name"]).tolist()
+
+    if "full_name" in cols:
+        return df2["full_name"].tolist()
+
+    # fallback — first column
+    return df2.iloc[:, 0].astype(str).tolist()
+
 # --------------------------------------------
 # PAGE SETUP
 # --------------------------------------------
@@ -739,6 +764,66 @@ if st.session_state.get("conn"):
                         st.dataframe(downstream_procs)
                     else:
                         st.write("None")
+
+                # ======================================================
+                # 🕸 LINEAGE GRAPH (CATALOG VIEW)
+                # ======================================================
+
+                # ======================================================
+                # 🕸 LINEAGE GRAPH (CATALOG VIEW)
+                # ======================================================
+
+                st.markdown("## 🕸 Lineage Graph")
+
+                edges = []
+
+                base_object = selected.upper()
+
+                # --------------------------
+                # UPSTREAM → BASE
+                # --------------------------
+
+                for t in lineage.get("tables", []):
+                    edges.append((t.upper(), base_object))
+
+                for v in lineage.get("views", []):
+                    edges.append((v.upper(), base_object))
+
+                for p in lineage.get("procedures", []):
+                    edges.append((p.upper(), base_object))
+
+                # --------------------------
+                # BASE → DOWNSTREAM
+                # --------------------------
+
+                for v in _build_full_names(downstream_views):
+                    edges.append((base_object, v.upper()))
+
+                for p in _build_full_names(downstream_procs):
+                    edges.append((base_object, p.upper()))
+
+                if not edges:
+                    st.info("No lineage relationships found.")
+                else:
+
+                    import networkx as nx
+                    from pyvis.network import Network
+                    import tempfile
+
+                    G = nx.DiGraph()
+
+                    # Add nodes & edges
+                    for src, tgt in edges:
+                        G.add_node(src)
+                        G.add_node(tgt)
+                        G.add_edge(src, tgt)
+
+                    graph_path = render_graph(G)
+
+                    with open(graph_path, "r", encoding="utf-8") as f:
+                        st.components.v1.html(f.read(), height=650)
+
+
                 overview_df = st.session_state.get("catalog_overview")
 
                 row_meta = overview_df[
