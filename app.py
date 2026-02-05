@@ -530,8 +530,8 @@ if st.session_state.get("conn"):
                     with cols[list(chunk.index).index(i)]:
 
                         clicked = st.button(
-                            f"📦 {row['full_name']}\n\n"
-                            f"Last Modified: {row.get('modify_date', 'N/A')}",
+                            f"📦 {row['full_name']}\n\n",
+                            # f"Last Modified: {row.get('modify_date', 'N/A')}",
                             key=f"tbl_{row['full_name']}",
                             use_container_width=True,
                         )
@@ -563,8 +563,8 @@ if st.session_state.get("conn"):
                     with cols[list(chunk.index).index(i)]:
 
                         clicked = st.button(
-                            f"👁️ {row['full_name']}\n\n"
-                            f"Last Modified: {row.get('modify_date', 'N/A')}",
+                            f"👁️ {row['full_name']}\n\n",
+                            # f"Last Modified: {row.get('modify_date', 'N/A')}",
                             key=f"view_{row['full_name']}",
                             use_container_width=True,
                         )
